@@ -6,7 +6,7 @@ Rust template project for monorepo
 ## Change the initial commit
 
 ```shell
-git commit --amend --message "🎂 Project initialized!" --date "2012-12-12"
+git commit --amend --message "🎂 Project initialized!" --date "2022-12-12"
 ```
 
 ## Emoji Comment
