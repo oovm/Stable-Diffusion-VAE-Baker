@@ -5,6 +5,9 @@
 #![doc(html_favicon_url = "https://raw.githubusercontent.com/oovm/shape-rs/dev/projects/images/Trapezohedron.svg")]
 
 mod errors;
-mod baker;
+mod vae;
+pub mod helpers;
 
 pub use crate::errors::{ExampleErrorKind, Result, ExampleError};
+
+pub use self::vae::bake_vae;
