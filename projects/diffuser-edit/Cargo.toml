@@ -2,7 +2,7 @@
 name = "diffuser-edit"
 version = "0.0.0"
 authors = ["Aster <192607617@qq.com>"]
-description = "..."
+description = "Edit diffuser models without GPU and Python"
 categories = ["rust-patterns"]
 homepage = "https://github.com/oovm/RustTemplate"
 repository = "https://github.com/oovm/RustTemplate"

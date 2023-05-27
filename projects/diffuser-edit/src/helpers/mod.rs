@@ -7,6 +7,9 @@ pub fn load_model(path: &Path) -> candle_core::Result<HashMap<String, Tensor>> {
         Some(s) if s.eq("pt") => {
             candle_core::pickle::read_all_with_key(path, None)?.into_iter().collect()
         }
+        Some(s) if s.eq("ckpt") => {
+            unimplemented!("loading `ckpt` checkpoints is not yet supported")
+        }
         _ => {
             candle_core::safetensors::load(path, &Device::Cpu)?
         }
