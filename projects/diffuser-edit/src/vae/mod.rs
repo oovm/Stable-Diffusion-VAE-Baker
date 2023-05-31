@@ -3,7 +3,7 @@ use candle_core::{Tensor};
 use std::collections::HashMap;
 use std::path::Path;
 use candle_core::safetensors::save;
-use crate::helpers::load_model;
+use crate::helpers::{load_model, quantize_f16};
 
 
 pub fn bake_vae_by_path(checkpoint: &Path, vae: &Path) -> candle_core::Result<()> {
@@ -17,6 +17,7 @@ pub fn bake_vae_by_path(checkpoint: &Path, vae: &Path) -> candle_core::Result<()
     let mut checkpoint_weight = load_model(checkpoint)?;
     bake_vae_sd15(&mut checkpoint_weight, &vae_weight);
     let name = format!("{}-{}.safetensors", checkpoint.file_stem().unwrap().to_str().unwrap(), vae.file_stem().unwrap().to_str().unwrap());
+    quantize_f16(&mut checkpoint_weight)?;
     tracing::info!("Saving Baked Stable Diffusion: {}", name);
     save(&checkpoint_weight, name)
 }
