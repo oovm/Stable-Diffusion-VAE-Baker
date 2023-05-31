@@ -15,7 +15,7 @@ fn run() -> candle_core::Result<()> {
         .init();
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let model = here.join("tests/DeepOcean-720000.safetensors");
-    let vae = here.join("tests/NyanMix.vae.pt");
+    let vae = here.join("tests/kl-f8-anime2.vae.safetensors");
     bake_vae_by_path(&model, &vae)
 }
 
@@ -25,7 +25,7 @@ fn run2() -> candle_core::Result<()> {
         .with_max_level(tracing::Level::DEBUG)
         .init();
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let model = here.join("tests/Shiny-720000.safetensors");
+    let model = here.join("tests/ShinySky-640000.safetensors");
     let vae = here.join("tests/kl-f8-anime2.vae.safetensors");
     bake_vae_by_path(&model, &vae)
 }
