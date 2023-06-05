@@ -21,6 +21,10 @@ image = { version = "0.25.1", features = ["jpeg", "webp", "avif"] }
 walkdir = "2.5.0"
 kamadak-exif = "0.5.5"
 little_exif = "0.3.3"
+img-parts = "0.3.0"
+png = "0.17.13"
+rayon = "1.10.0"
+sha2 = "0.11.0-pre.3"
 
 [dev-dependencies]
 tracing-subscriber = "0.3.18"
