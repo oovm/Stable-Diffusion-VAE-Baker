@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use diffuser_edit::bake_vae_by_path;
+use diffuser_edit::{bake_vae_by_path, ImageProcessing};
 use std::path::Path;
 use candle_core::{Device, Tensor};
 
@@ -40,10 +40,6 @@ fn text_em() {
     }
 }
 
-use safetensors::SafeTensors;
-use std::error::Error;
-use diffuser_edit::helpers::process_directory;
-
 // #[test]
 // fn main() -> Result<(), Box<dyn Error>> {
 //     let safetensors_file: &[u8] = include_bytes!(r#"C:\Users\Aster\Downloads\gatomon.safetensors"#);
@@ -60,8 +56,13 @@ use diffuser_edit::helpers::process_directory;
 
 #[test]
 fn main2() {
-    let dir = Path::new(r#"C:\Users\Aster\Downloads"#);
-    if let Err(e) = process_directory(&dir) {
+    let dir = Path::new(r#"C:\Users\Administrator\Downloads"#);
+    let step = ImageProcessing {
+        crop_alpha: true,
+        erase_alpha: true,
+        delete_source: true,
+    };
+    if let Err(e) = step.convert_directory(&dir) {
         eprintln!("Error processing directory: {:?}", e);
     }
 }
