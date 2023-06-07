@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, SendError};
@@ -15,29 +16,19 @@ pub struct ImageProcessing {
 
 impl ImageProcessing {
     pub fn convert_directory(&self, path: &Path) {
-        let (tx, rx) = std::sync::mpsc::channel();
         for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
-            match path.extension().and_then(|s| s.to_str()) {
-                Some("webp") | Some("avif") | Some("gif") | Some("png") => {
+            let extension = match path.extension() {
+                Some(s) => { s.to_ascii_lowercase() }
+                None => { continue }
+            };
+            match extension.to_str() {
+                Some("webp") | Some("avif") | Some("gif") | Some("png") | Some("jpg_large") | Some("jpg_small") | Some("jpg") => {
                     let this = self.clone();
                     let path = path.to_path_buf();
-                    let tx = tx.clone();
-                    std::thread::spawn(
-                        move || {
-                            if let Err(e) = tx.send(this.convert_path(&path)) {
-                                eprintln!("{e}")
-                            }
-                        }
-                    );
+                    this.convert_path(&path).unwrap();
                 }
                 _ => {}
-            }
-        }
-
-        while let Ok(this) = rx.recv() {
-            if let Err(e) = this {
-                eprintln!("Failed to convert {:?}: {:?}", path, e);
             }
         }
     }
@@ -49,7 +40,7 @@ impl ImageProcessing {
         let img = erase_alpha(&img)?;
         // Prepare the output path
         let mut output_path = path.to_path_buf();
-        output_path.set_extension("jpg");
+        output_path.set_extension("jpeg");
         // Save the image as JPEG with 95% quality
         let mut output_file = File::create(&output_path)?;
         img.write_to(&mut output_file, ImageFormat::Jpeg)?;
