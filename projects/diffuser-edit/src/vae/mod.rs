@@ -1,10 +1,6 @@
-use std::borrow::Cow;
-use candle_core::{Tensor};
-use std::collections::HashMap;
-use std::path::Path;
-use candle_core::safetensors::save;
 use crate::helpers::{load_model, quantize_f16};
-
+use candle_core::{safetensors::save, Tensor};
+use std::{borrow::Cow, collections::HashMap, path::Path};
 
 pub fn bake_vae_by_path(checkpoint: &Path, vae: &Path) -> candle_core::Result<()> {
     tracing::info!("Loading VAE: {}", vae.display());
@@ -16,7 +12,11 @@ pub fn bake_vae_by_path(checkpoint: &Path, vae: &Path) -> candle_core::Result<()
     tracing::info!("Loading Stable Diffusion: {}", checkpoint.display());
     let mut checkpoint_weight = load_model(checkpoint)?;
     bake_vae_sd15(&mut checkpoint_weight, &vae_weight);
-    let name = format!("{}-{}.safetensors", checkpoint.file_stem().unwrap().to_str().unwrap(), vae.file_stem().unwrap().to_str().unwrap());
+    let name = format!(
+        "{}-{}.safetensors",
+        checkpoint.file_stem().unwrap().to_str().unwrap(),
+        vae.file_stem().unwrap().to_str().unwrap()
+    );
     quantize_f16(&mut checkpoint_weight)?;
     tracing::info!("Saving Baked Stable Diffusion: {}", name);
     save(&checkpoint_weight, name)
@@ -25,7 +25,6 @@ pub fn bake_vae_by_path(checkpoint: &Path, vae: &Path) -> candle_core::Result<()
 pub fn bake_vae(checkpoint: &mut HashMap<String, Tensor>, vae: &HashMap<String, Tensor>) {
     bake_vae_sd15(checkpoint, vae)
 }
-
 
 /// `encoder` + `decoder` + `quant_conv`
 ///
@@ -75,12 +74,7 @@ fn vae_key_transform(key: &str) -> Option<Cow<str>> {
     if key.starts_with("first_stage_model") {
         return Some(Cow::Borrowed(key));
     }
-    let first_stage_model = &[
-        "encoder",
-        "decoder",
-        "quant_conv",
-        "post_quant_conv",
-    ];
+    let first_stage_model = &["encoder", "decoder", "quant_conv", "post_quant_conv"];
     for prefix in first_stage_model {
         if key.starts_with(prefix) {
             return Some(Cow::Owned(format!("first_stage_model.{key}")));
