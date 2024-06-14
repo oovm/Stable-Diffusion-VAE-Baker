@@ -8,7 +8,9 @@ pub fn bake_vae(mut checkpoint: HashMap<String, Tensor>, vae: &HashMap<String, T
         .filter(|(k, _)| !k.starts_with("loss") && !k.starts_with("mode"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    // Replace VAE in checkpoint with new VAE weights
+    for (k, v) in vae_dict.iter() {
+        println!("{}", k)
+    }
     for (k, v) in vae_dict.iter() {
         let key_name = format!("first_stage_model.{}", k);
         checkpoint.insert(key_name, v.clone());

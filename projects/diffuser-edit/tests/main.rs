@@ -1,11 +1,5 @@
-use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
-use candle_core::safetensors::{load_buffer, save};
-use candle_core::pickle::{read_all, read_all_with_key};
-use candle_core::{Device, Tensor};
+use candle_core::safetensors::{save};
 use diffuser_edit::bake_vae;
 use diffuser_edit::helpers::load_model;
 
@@ -17,15 +11,15 @@ fn ready() {
 
 #[test]
 fn run() -> candle_core::Result<()> {
-    let mut here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let model = here.join("tests/DeepOcean-720000.baked.safetensors");
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let model = here.join("tests/DeepOcean-720000.safetensors");
     let vae = here.join("tests/DeepOcean.vae.pt");
     save_baked(&model, &vae)
 }
 
 #[test]
 fn run2() -> candle_core::Result<()> {
-    let mut here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let model = here.join("tests/Shiny-720000.safetensors");
     let vae = here.join("tests/kl-f8-anime2.vae.safetensors");
     save_baked(&model, &vae)
