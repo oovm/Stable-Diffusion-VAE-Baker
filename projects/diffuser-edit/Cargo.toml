@@ -1,6 +1,5 @@
 [package]
-name = "stable-diffusion-vae-baker"
-publish = false
+name = "diffuser-edit"
 version = "0.0.0"
 authors = ["Aster <192607617@qq.com>"]
 description = "..."
@@ -15,6 +14,7 @@ exclude = ["package.json", "tests/**"]
 
 [dependencies]
 candle-core = "0.5.1"
+serde_json = "1.0.117"
 
 [dev-dependencies]
 
