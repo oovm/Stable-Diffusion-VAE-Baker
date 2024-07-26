@@ -1,5 +1,5 @@
 [package]
-name = "diffuser-edit"
+name = "diffuser-exif"
 version = "0.0.0"
 authors = ["Aster <192607617@qq.com>"]
 description = "Edit diffuser models without GPU and Python"
@@ -19,6 +19,8 @@ serde_json = "1.0.117"
 tracing = "0.1.40"
 image = { version = "0.25.1", features = ["jpeg", "webp", "avif"] }
 walkdir = "2.5.0"
+kamadak-exif = "0.5.5"
+little_exif = "0.3.3"
 
 [dev-dependencies]
 tracing-subscriber = "0.3.18"
