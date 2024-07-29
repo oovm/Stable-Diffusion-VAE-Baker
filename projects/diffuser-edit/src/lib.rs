@@ -8,6 +8,8 @@ mod errors;
 pub mod helpers;
 mod vae;
 
+mod preprocessing;
+
 pub use crate::errors::{ExampleError, ExampleErrorKind, Result};
 
 pub use self::vae::{bake_vae, bake_vae_by_path};
