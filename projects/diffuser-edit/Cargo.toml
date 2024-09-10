@@ -1,12 +1,12 @@
 [package]
 name = "diffuser-edit"
-version = "0.0.0"
+version = "0.0.2"
 authors = ["Aster <192607617@qq.com>"]
 description = "Edit diffuser models without GPU and Python"
 categories = ["rust-patterns"]
 homepage = "https://github.com/oovm/RustTemplate"
 repository = "https://github.com/oovm/RustTemplate"
-documentation = "https://docs.rs/sub_projects"
+documentation = "https://docs.rs/diffuser-edit"
 readme = "readme.md"
 license = "MPL-2.0"
 edition = "2021"

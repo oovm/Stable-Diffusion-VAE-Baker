@@ -1,7 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::error::Error;
+use std::fs::File;
 use diffuser_edit::{bake_vae_by_path, ImageProcessing};
-use std::path::Path;
-use candle_core::{Device, Tensor};
+use std::path::{Path, PathBuf};
+use candle_core::{DType, Device, Tensor};
+use candle_core::safetensors::Load;
+use safetensors::SafeTensors;
+use safetensors::tensor::TensorView;
 
 #[test]
 fn ready() {
@@ -40,29 +45,42 @@ fn text_em() {
     }
 }
 
-// #[test]
-// fn main() -> Result<(), Box<dyn Error>> {
-//     let safetensors_file: &[u8] = include_bytes!(r#"C:\Users\Aster\Downloads\gatomon.safetensors"#);
-//
-//     let (safetensors, meta) = SafeTensors::read_metadata(safetensors_file)?;
-//
-//     println!("SafeTensors Metadata:");
-//     for (key, metadata) in meta.metadata().clone().unwrap() {
-//         println!("{}: {:?}", key, metadata);
-//     }
-//
-//     Ok(())
-// }
+
+pub fn sign_model(path: &str, path2: &Path) -> Result<(), Box<dyn Error>> {
+    let safetensors_file = std::fs::read(path)?;
+    let safetensors = SafeTensors::deserialize(&safetensors_file)?;
+    let (_, meta) = SafeTensors::read_metadata(&safetensors_file)?;
+    let mut meta = match meta.metadata() {
+        Some(s) => { s.clone() }
+        None => { Default::default() }
+    };
+    meta.insert("ss_author".to_string(), "https://civitai.com/user/XEZ".to_string());
+    safetensors::serialize_to_file(safetensors.tensors(), &Some(meta), path2)?;
+    //
+    // println!("SafeTensors Metadata:");
+    // for (key, metadata) in meta.metadata().clone().unwrap() {
+    //     println!("{}: {:?}", key, metadata);
+    // }
+    Ok(())
+}
+
+#[test]
+fn main3() {
+    let dir = sign_model(
+        r#"C:\Users\Aster\Downloads\realisticFreedom3_auroraV09.safetensors"#,
+        &Path::new(r#"C:\Users\Aster\Downloads\XE_UNREAL_SD3.safetensors"#),
+    );
+    // step.convert_directory(&dir)
+}
+
 
 #[test]
 fn main2() {
-    let dir = Path::new(r#"C:\Users\Administrator\Downloads"#);
+    let dir = Path::new(r#"C:\Users\Aster\Downloads"#);
     let step = ImageProcessing {
         crop_alpha: true,
         erase_alpha: true,
         delete_source: true,
     };
-    if let Err(e) = step.convert_directory(&dir) {
-        eprintln!("Error processing directory: {:?}", e);
-    }
+    step.convert_directory(&dir)
 }
