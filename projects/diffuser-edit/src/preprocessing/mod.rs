@@ -22,11 +22,28 @@ impl ImageProcessing {
                 Some(s) => { s.to_ascii_lowercase() }
                 None => { continue }
             };
+
             match extension.to_str() {
-                Some("webp") | Some("avif") | Some("gif") | Some("png") | Some("jpg_large") | Some("jpg_small") | Some("jpg") => {
+                #[cfg(feature = "avif")]
+                Some("avif") => {
                     let this = self.clone();
                     let path = path.to_path_buf();
                     this.convert_path(&path).unwrap();
+                }
+                Some("webp") | Some("gif") | Some("png")  => {
+                    let this = self.clone();
+                    let path = path.to_path_buf();
+                    match this.convert_path(&path) {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("{e}")
+                    };
+                }
+              Some("jpg_large") | Some("jpg_small") | Some("jpg") => {
+                    let new = path.with_extension("jpeg");
+                    match std::fs::rename(&path, &new) {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("{e}")
+                    };
                 }
                 _ => {}
             }
