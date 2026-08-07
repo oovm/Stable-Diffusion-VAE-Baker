@@ -1,11 +1,10 @@
+use image::{DynamicImage, GenericImageView, ImageBuffer, ImageError, ImageFormat, Rgb, RgbImage};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::path::Path;
-use std::sync::mpsc::{Receiver, Sender, SendError};
-use image::{DynamicImage, GenericImageView, ImageBuffer, ImageError, ImageFormat, Rgb, RgbImage};
+use std::sync::mpsc::{Receiver, SendError, Sender};
 use walkdir::WalkDir;
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct ImageProcessing {
@@ -19,8 +18,8 @@ impl ImageProcessing {
         for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
             let extension = match path.extension() {
-                Some(s) => { s.to_ascii_lowercase() }
-                None => { continue }
+                Some(s) => s.to_ascii_lowercase(),
+                None => continue,
             };
 
             match extension.to_str() {
@@ -30,19 +29,19 @@ impl ImageProcessing {
                     let path = path.to_path_buf();
                     this.convert_path(&path).unwrap();
                 }
-                Some("webp") | Some("gif") | Some("png")  => {
+                Some("webp") | Some("gif") | Some("png") => {
                     let this = self.clone();
                     let path = path.to_path_buf();
                     match this.convert_path(&path) {
                         Ok(_) => {}
-                        Err(e) => eprintln!("{e}")
+                        Err(e) => eprintln!("{e}"),
                     };
                 }
-              Some("jpg_large") | Some("jpg_small") | Some("jpg") => {
+                Some("jpg_large") | Some("jpg_small") | Some("jpg") => {
                     let new = path.with_extension("jpeg");
                     match std::fs::rename(&path, &new) {
                         Ok(_) => {}
-                        Err(e) => eprintln!("{e}")
+                        Err(e) => eprintln!("{e}"),
                     };
                 }
                 _ => {}
@@ -71,7 +70,6 @@ impl ImageProcessing {
         Ok(())
     }
 }
-
 
 fn crop_alpha(mut image: DynamicImage) -> Result<DynamicImage, ImageError> {
     // 裁剪掉四周的空白像素
@@ -112,4 +110,3 @@ fn erase_alpha(image: &DynamicImage) -> Result<RgbImage, ImageError> {
 
     return Ok(output_img);
 }
-

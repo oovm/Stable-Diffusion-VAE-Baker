@@ -1,0 +1,24 @@
+[package]
+name = "diffusion-tools"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+diffuser-edit = { path = "../diffuser-edit" }
+diffusion-types = { path = "../diffusion-types" }
+diffusion-models = { path = "../diffusion-models" }
+diffusion-registry = { path = "../diffusion-registry" }
+diffusion-server = { path = "../diffusion-server" }
+candle-core.workspace = true
+safetensors = "0.4"
+candle-transformers = "0.11.0"
+candle-examples = "0.11.0"
+tokenizers = "0.22"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+rand = "0.9"
+image.workspace = true
+uuid.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+[[bin]]
+name = "sd"
+path = "src/main.rs"

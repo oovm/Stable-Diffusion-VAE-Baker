@@ -13,21 +13,22 @@ edition = "2021"
 exclude = ["package.json", "tests/**"]
 
 [dependencies]
-safetensors = "0.4.3"
-candle-core = "0.6.0"
+safetensors = "0.8.0"
+candle-core = "0.11.0"
 serde_json = "1.0.117"
 tracing = "0.1.40"
 image = { version = "0.25.1", features = ["jpeg", "webp", "avif"] }
 walkdir = "2.5.0"
-kamadak-exif = "0.5.5"
-little_exif = "0.3.3"
-img-parts = "0.3.0"
-png = "0.17.13"
+kamadak-exif = "0.6.1"
+little_exif = "0.6.23"
+img-parts = "0.4.0"
+png = "0.18.1"
 rayon = "1.10.0"
 sha2 = "0.11.0-pre.3"
 
 [dev-dependencies]
 tracing-subscriber = "0.3.18"
+diffuser-edit = { path = "../diffuser-edit" }
 
 [features]
 default = []

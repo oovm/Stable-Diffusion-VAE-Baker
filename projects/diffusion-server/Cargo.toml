@@ -1,0 +1,11 @@
+[package]
+name = "diffusion-server"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+diffusion-types = { path = "../diffusion-types" }
+axum = "0.7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

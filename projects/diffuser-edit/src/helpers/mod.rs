@@ -1,9 +1,8 @@
 use candle_core::{DType, Device, Tensor};
-use std::{collections::HashMap, path::Path};
-use std::error::Error;
 use image::{DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgb, RgbImage};
+use std::error::Error;
 use std::fs;
-
+use std::{collections::HashMap, path::Path};
 
 use walkdir::WalkDir;
 
@@ -35,9 +34,8 @@ pub fn quantize_f16(checkpoint: &mut HashMap<String, Tensor>) -> candle_core::Re
                 tracing::info!("    Quantize: f64 `{}` to f16", k);
                 *v = v.to_dtype(DType::BF16)?
             }
+            _ => {}
         }
     }
     Ok(())
 }
-
-

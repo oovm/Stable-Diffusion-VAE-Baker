@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use diffuser_edit::bake_vae_by_path;
-use std::path::Path;
 use candle_core::{Device, Tensor};
+use diffuser_edit::bake_vae_by_path;
+use std::collections::HashMap;
+use std::path::Path;
 
 #[test]
 fn ready() {
@@ -42,7 +42,6 @@ fn text_em() {
 
 use safetensors::SafeTensors;
 use std::error::Error;
-use diffuser_edit::helpers::process_directory;
 
 // #[test]
 // fn main() -> Result<(), Box<dyn Error>> {
@@ -59,9 +58,7 @@ use diffuser_edit::helpers::process_directory;
 // }
 
 #[test]
+#[ignore = "requires a local image collection and the removed legacy directory processor"]
 fn main2() {
-    let dir = Path::new(r#"C:\Users\Aster\Downloads"#);
-    if let Err(e) = process_directory(&dir) {
-        eprintln!("Error processing directory: {:?}", e);
-    }
+    let _dir = Path::new(r#"C:\Users\Aster\Downloads"#);
 }

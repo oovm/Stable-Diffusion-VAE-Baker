@@ -1,5 +1,5 @@
 use crate::helpers::{load_model, quantize_f16};
-use candle_core::{safetensors::save, Tensor};
+use candle_core::{Tensor, safetensors::save};
 use std::{borrow::Cow, collections::HashMap, path::Path};
 
 pub fn bake_vae_by_path(checkpoint: &Path, vae: &Path) -> candle_core::Result<()> {

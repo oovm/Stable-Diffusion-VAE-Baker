@@ -1,13 +1,13 @@
 use std::fs::{self, File};
+use std::io::BufReader;
 
+use image::ImageError;
 use img_parts::png::Png;
 use img_parts::{Bytes, ImageEXIF, ImageICC};
-use image::ImageError;
-
 
 fn read_exif_from_png(image_path: &str) -> Result<(), ImageError> {
     // 读取图片文件
-    let decoder = png::Decoder::new(File::open(image_path)?);
+    let decoder = png::Decoder::new(BufReader::new(File::open(image_path)?));
     let mut reader = decoder.read_info().unwrap();
     // If the text chunk is before the image data frames, `reader.info()` already contains the text.
     for text_chunk in &reader.info().uncompressed_latin1_text {
@@ -21,15 +21,16 @@ fn read_exif_from_png(image_path: &str) -> Result<(), ImageError> {
 
 #[test]
 fn main() {
-    let exif = read_exif_from_png(r#"C:\Users\Aster\Downloads\c62755dc02d1bb48608588b44a3a7fcfc838d36b8f01bf845fc7cc46c16bfe1e.png"#).expect("Failed to read EXIF from the PNG image");
+    let exif =
+        read_exif_from_png(r#"C:\Users\Aster\Downloads\c62755dc02d1bb48608588b44a3a7fcfc838d36b8f01bf845fc7cc46c16bfe1e.png"#)
+            .expect("Failed to read EXIF from the PNG image");
     // for f in exif.fields() {
     //     println!("{} {} {}",
     //              f.tag, f.ifd_num, f.display_value().with_unit(&exif));
     // }
 }
 
-
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 const TARGET_PREFIX: &str = "114514";
