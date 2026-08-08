@@ -49,6 +49,65 @@ pub struct TitanVaeResnetBlock {
     shortcut: Option<Conv>,
 }
 
+/// One VAE decoder up block with three residual stages and optional upsample.
+pub struct TitanVaeUpBlock {
+    resnets: Vec<TitanVaeResnetBlock>,
+    upsample: Option<Conv>,
+}
+
+impl TitanVaeUpBlock {
+    /// Loads a decoder up block from the real Diffusers VAE.
+    pub fn from_model(
+        model_dir: &Path,
+        block_index: usize,
+        input_channels: usize,
+        output_channels: usize,
+        context: &CudaContext,
+    ) -> Result<Self, String> {
+        let path = model_dir.join("vae/diffusion_pytorch_model.safetensors");
+        let prefix = format!("decoder.up_blocks.{block_index}");
+        let mut resnets = Vec::with_capacity(3);
+        for index in 0..3 {
+            let input = if index == 0 { input_channels } else { output_channels };
+            resnets.push(TitanVaeResnetBlock::from_model(
+                model_dir,
+                &format!("{prefix}.resnets.{index}"),
+                input,
+                output_channels,
+                context,
+            )?);
+        }
+        let upsample =
+            if block_index < 3 { Some(Conv::load(&path, &format!("{prefix}.upsamplers.0.conv"), context)?) } else { None };
+        Ok(Self { resnets, upsample })
+    }
+
+    /// Runs the VAE block and doubles spatial dimensions when configured.
+    pub fn forward(&self, input: &CudaTensor) -> Result<CudaTensor, String> {
+        let mut hidden = CudaTensor::from_slice(
+            input.context(),
+            input.shape().to_vec(),
+            &input.to_vec().map_err(|e| format!("VAE up input: {e:?}"))?,
+        )
+        .map_err(|e| format!("VAE up input upload: {e:?}"))?;
+        for resnet in &self.resnets {
+            hidden = resnet.forward(&hidden)?;
+        }
+        match &self.upsample {
+            Some(upsample) => {
+                let [_, _, height, width] = hidden.shape()
+                else {
+                    return Err("VAE up rank".into());
+                };
+                let resized =
+                    hidden.resize_nearest2d_nchw(*height * 2, *width * 2).map_err(|e| format!("VAE up resize: {e:?}"))?;
+                upsample.forward(&resized, [1, 1])
+            }
+            None => Ok(hidden),
+        }
+    }
+}
+
 impl TitanVaeResnetBlock {
     /// Loads one Diffusers VAE block such as `decoder.mid_block.resnets.0`.
     pub fn from_model(
@@ -144,6 +203,17 @@ mod tests {
         let input = CudaTensor::from_slice(context, vec![1, 512, 4, 4], &vec![0.0; 512 * 4 * 4]).expect("input");
         let output = block.forward(&input).expect("VAE ResNet forward");
         assert_eq!(output.shape(), &[1, 512, 4, 4]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_vae_up_block_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("CUDA context");
+        let block = TitanVaeUpBlock::from_model(&model_dir, 2, 512, 256, &context).expect("VAE up block weights");
+        let input = CudaTensor::from_slice(context, vec![1, 512, 2, 2], &vec![0.0; 512 * 2 * 2]).expect("input");
+        let output = block.forward(&input).expect("VAE up block forward");
+        assert_eq!(output.shape(), &[1, 256, 4, 4]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
