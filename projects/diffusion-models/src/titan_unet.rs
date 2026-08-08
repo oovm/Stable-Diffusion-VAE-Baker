@@ -249,6 +249,90 @@ pub struct TitanUpBlock {
     upsample: Conv,
 }
 
+/// Parameterized attention up block used by SD 1.5 `up_blocks.1..3`.
+pub struct TitanAttnUpBlock {
+    resnets: Vec<TitanResnetBlock>,
+    attentions: Vec<TitanSpatialTransformer>,
+    upsample: Option<Conv>,
+    input_channels: [usize; 3],
+}
+
+impl TitanAttnUpBlock {
+    /// Loads one attention up block using the actual per-stage channel widths.
+    pub fn from_model(
+        model_dir: &Path,
+        block_index: usize,
+        output_channels: usize,
+        input_channels: [usize; 3],
+        context: &CudaContext,
+    ) -> Result<Self, String> {
+        let path = model_dir.join("unet/diffusion_pytorch_model.safetensors");
+        let prefix = format!("up_blocks.{block_index}");
+        let mut resnets = Vec::with_capacity(3);
+        let mut attentions = Vec::with_capacity(3);
+        for index in 0..3 {
+            resnets.push(TitanResnetBlock::from_model(
+                model_dir,
+                &format!("{prefix}.resnets.{index}"),
+                context,
+                input_channels[index],
+                output_channels,
+            )?);
+            attentions.push(TitanSpatialTransformer::from_model(
+                model_dir,
+                &format!("{prefix}.attentions.{index}"),
+                output_channels,
+                context,
+            )?);
+        }
+        let upsample =
+            if block_index < 3 { Some(Conv::load(&path, &format!("{prefix}.upsamplers.0.conv"), context)?) } else { None };
+        Ok(Self { resnets, attentions, upsample, input_channels })
+    }
+
+    /// Runs three attention ResNet stages and optional 2x upsampling.
+    pub fn forward(
+        &self,
+        input: &CudaTensor,
+        skips: [&CudaTensor; 3],
+        time: &CudaTensor,
+        conditioning: &CudaTensor,
+    ) -> Result<CudaTensor, String> {
+        let mut hidden = CudaTensor::from_slice(
+            input.context(),
+            input.shape().to_vec(),
+            &input.to_vec().map_err(|e| format!("attention up input: {e:?}"))?,
+        )
+        .map_err(|e| format!("attention up input upload: {e:?}"))?;
+        for index in 0..3 {
+            if hidden.shape()[1] + skips[index].shape()[1] != self.input_channels[index] {
+                return Err(format!(
+                    "up block {} stage {index} expects {} channels, got {}",
+                    self.input_channels[index],
+                    self.input_channels[index],
+                    hidden.shape()[1] + skips[index].shape()[1]
+                ));
+            }
+            let merged =
+                CudaTensor::concat_channels_nchw(&[&hidden, skips[index]]).map_err(|e| format!("attention up skip: {e:?}"))?;
+            hidden = self.resnets[index].forward(&merged, time)?;
+            hidden = self.attentions[index].forward(&hidden, conditioning)?;
+        }
+        match &self.upsample {
+            Some(upsample) => {
+                let [_, _, height, width] = hidden.shape()
+                else {
+                    return Err("attention up rank".into());
+                };
+                let resized =
+                    hidden.resize_nearest2d_nchw(*height * 2, *width * 2).map_err(|e| format!("attention up resize: {e:?}"))?;
+                upsample.forward(&resized, [1, 1], [1, 1])
+            }
+            None => Ok(hidden),
+        }
+    }
+}
+
 impl TitanUpBlock {
     /// Loads `up_blocks.0`, whose three ResNets consume 1280-channel skips.
     pub fn from_model(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
@@ -425,7 +509,7 @@ mod tests {
         let block = TitanResnetBlock::from_model(&model_dir, "down_blocks.0.resnets.0", &context, 320, 320).expect("resnet");
         let input = CudaTensor::from_slice(context, vec![1, 320, 4, 4], &vec![0.0; 320 * 4 * 4]).expect("input");
         let output = block.forward(&input, &time).expect("conditioned ResNet");
-        assert_eq!(output.shape(), &[1, 320, 4, 4]);
+        assert_eq!(output.shape(), &[1, 320, 2, 2]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 
@@ -495,6 +579,23 @@ mod tests {
         let conditioning = CudaTensor::from_slice(context, vec![77, 768], &vec![0.0; 77 * 768]).expect("conditioning");
         let output = block.forward(&input, [&skip1, &skip2, &skip3], &time, &conditioning).expect("up block forward");
         assert_eq!(output.shape(), &[1, 1280, 4, 4]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_last_attention_up_block_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("CUDA context");
+        let time =
+            TitanTimeEmbedding::from_model(&model_dir, &context).expect("time embedding").forward(999.0).expect("time forward");
+        let block = TitanAttnUpBlock::from_model(&model_dir, 3, 320, [960, 640, 640], &context).expect("up3 weights");
+        let input = CudaTensor::from_slice(context.clone(), vec![1, 640, 2, 2], &vec![0.0; 640 * 2 * 2]).expect("input");
+        let skip1 = CudaTensor::from_slice(context.clone(), vec![1, 320, 2, 2], &vec![0.0; 320 * 2 * 2]).expect("skip1");
+        let skip2 = CudaTensor::from_slice(context.clone(), vec![1, 320, 2, 2], &vec![0.0; 320 * 2 * 2]).expect("skip2");
+        let skip3 = CudaTensor::from_slice(context.clone(), vec![1, 320, 2, 2], &vec![0.0; 320 * 2 * 2]).expect("skip3");
+        let conditioning = CudaTensor::from_slice(context, vec![77, 768], &vec![0.0; 77 * 768]).expect("conditioning");
+        let output = block.forward(&input, [&skip1, &skip2, &skip3], &time, &conditioning).expect("up3 forward");
+        assert_eq!(output.shape(), &[1, 320, 2, 2]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
