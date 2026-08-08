@@ -6,10 +6,12 @@ use reqwest::{
     header::{AUTHORIZATION, CONTENT_RANGE, HeaderValue, RANGE},
 };
 use serde::{Deserialize, Serialize};
+use safetensors::SafeTensors;
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -30,13 +32,13 @@ pub enum RegistryError {
     WorkerPanic,
 }
 pub type Result<T> = std::result::Result<T, RegistryError>;
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceFile {
     pub path: String,
     pub url: String,
     pub expected_bytes: Option<u64>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSource {
     pub id: String,
     pub display_name: String,
@@ -57,8 +59,113 @@ pub struct DownloadMetadata {
     pub files: Vec<DownloadFile>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComponentIntegrity {
+    pub path: String,
+    pub exists: bool,
+    pub actual_bytes: Option<u64>,
+    pub expected_bytes: Option<u64>,
+    pub safetensors_valid: Option<bool>,
+    pub sha256: Option<String>,
+    pub complete: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelIntegrityReport {
+    pub model_id: String,
+    pub root: PathBuf,
+    pub legacy_manifest_migrated: bool,
+    pub components: Vec<ComponentIntegrity>,
+}
+
+impl ModelIntegrityReport {
+    pub fn complete(&self) -> bool { self.components.iter().all(|component| component.complete) }
+}
+
 fn source(path: &str, url: &str, expected_bytes: Option<u64>) -> SourceFile {
     SourceFile { path: path.into(), url: url.into(), expected_bytes }
+}
+
+fn is_safetensors(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+}
+
+fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    // Keep the streaming buffer on the heap: Windows main-thread stacks can be smaller than 1 MiB.
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 { break; }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn inspect_component(root: &Path, source: &SourceFile) -> ComponentIntegrity {
+    let path = root.join(&source.path);
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return ComponentIntegrity {
+            path: source.path.clone(), exists: false, actual_bytes: None, expected_bytes: source.expected_bytes,
+            safetensors_valid: None, sha256: None, complete: false, detail: "missing".into(),
+        },
+        Err(error) => return ComponentIntegrity {
+            path: source.path.clone(), exists: false, actual_bytes: None, expected_bytes: source.expected_bytes,
+            safetensors_valid: None, sha256: None, complete: false, detail: error.to_string(),
+        },
+    };
+    let size_matches = source.expected_bytes.is_none_or(|expected| expected == metadata.len());
+    let safetensors_valid = if is_safetensors(&path) {
+        Some(match fs::read(&path) {
+            Ok(bytes) => SafeTensors::deserialize(&bytes).is_ok(),
+            Err(_) => false,
+        })
+    } else { None };
+    let parse_matches = safetensors_valid.unwrap_or(true);
+    let complete = size_matches && parse_matches;
+    let detail = if complete { "trusted metadata and local file agree".into() }
+        else if !size_matches { format!("size mismatch: expected {:?}, got {}", source.expected_bytes, metadata.len()) }
+        else { "safetensors header or tensor table is invalid".into() };
+    ComponentIntegrity {
+        path: source.path.clone(), exists: true, actual_bytes: Some(metadata.len()), expected_bytes: source.expected_bytes,
+        safetensors_valid, sha256: sha256_file(&path).ok(), complete, detail,
+    }
+}
+
+pub fn verify(id: &str, root: impl AsRef<Path>) -> Result<ModelIntegrityReport> {
+    let model = well_known(id)?;
+    let root = root.as_ref().to_path_buf();
+    let legacy_manifest = root.join(".sd-download.json");
+    let legacy_manifest_migrated = fs::read(&legacy_manifest).ok()
+        .and_then(|bytes| serde_json::from_slice::<DownloadMetadata>(&bytes).ok())
+        .is_some_and(|metadata| metadata.model.files != model.files);
+    let report = ModelIntegrityReport {
+        model_id: model.id.clone(),
+        root: root.clone(),
+        legacy_manifest_migrated,
+        components: model.files.iter().map(|source| inspect_component(&root, source)).collect(),
+    };
+    if report.legacy_manifest_migrated {
+        let files = report.components.iter().map(|component| DownloadFile {
+            path: component.path.clone(),
+            downloaded_bytes: component.actual_bytes.unwrap_or(0),
+            expected_bytes: component.expected_bytes,
+            complete: component.complete,
+        }).collect();
+        write_manifest_atomic(&root, &DownloadMetadata { model, files })?;
+    }
+    Ok(report)
+}
+
+fn write_manifest_atomic(root: &Path, metadata: &DownloadMetadata) -> Result<()> {
+    let destination = root.join(".sd-download.json");
+    let temporary = root.join(".sd-download.json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(metadata)?)?;
+    fs::rename(&temporary, destination)?;
+    Ok(())
 }
 
 pub fn well_known(id: &str) -> Result<ModelSource> {
@@ -75,8 +182,9 @@ fn download_file(client: Client, source: SourceFile, output: &Path, progress: Ar
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut offset = destination.metadata().map(|meta| meta.len()).unwrap_or(0);
-    if source.expected_bytes.is_some_and(|size| offset == size) {
+    let existing = inspect_component(output, &source);
+    let mut offset = existing.actual_bytes.unwrap_or(0);
+    if existing.complete {
         return Ok(DownloadFile {
             path: source.path,
             downloaded_bytes: offset,
@@ -188,6 +296,45 @@ pub fn download(id: &str, output: impl AsRef<Path>) -> Result<DownloadMetadata> 
         })
         .collect::<Result<_>>()?;
     let metadata = DownloadMetadata { model, files };
-    fs::write(output.join(".sd-download.json"), serde_json::to_vec_pretty(&metadata)?)?;
+    write_manifest_atomic(&output, &metadata)?;
     Ok(metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sd15_trusted_clip_length_matches_valid_diffusers_export() {
+        let model = well_known("sd15").expect("sd15 source");
+        let clip = model.files.iter().find(|file| file.path == "text_encoder/model.safetensors").expect("clip source");
+        assert_eq!(clip.expected_bytes, Some(492_265_874));
+    }
+
+    #[test]
+    fn missing_model_directory_has_structured_component_report() {
+        let root = std::env::temp_dir().join(format!("sd-registry-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let report = verify("sd15", &root).expect("report");
+        assert_eq!(report.components.len(), 4);
+        assert!(!report.complete());
+        assert!(report.components.iter().all(|component| !component.exists && component.detail == "missing"));
+    }
+
+    #[test]
+    fn verify_atomically_migrates_a_stale_manifest_to_trusted_metadata() {
+        let root = std::env::temp_dir().join(format!("sd-registry-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temporary root");
+        let mut stale_model = well_known("sd15").expect("sd15 source");
+        stale_model.files[1].expected_bytes = Some(643_392_057);
+        let stale = DownloadMetadata { model: stale_model, files: vec![] };
+        fs::write(root.join(".sd-download.json"), serde_json::to_vec(&stale).expect("serialize stale manifest")).expect("write stale manifest");
+        let report = verify("sd15", &root).expect("migrate manifest");
+        assert!(report.legacy_manifest_migrated);
+        let refreshed: DownloadMetadata = serde_json::from_slice(&fs::read(root.join(".sd-download.json")).expect("read refreshed manifest")).expect("parse refreshed manifest");
+        assert_eq!(refreshed.model.files[1].expected_bytes, Some(492_265_874));
+        assert!(!root.join(".sd-download.json.tmp").exists());
+        let _ = fs::remove_dir_all(root);
+    }
 }

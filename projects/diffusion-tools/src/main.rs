@@ -46,6 +46,13 @@ enum Command {
         vae: PathBuf,
         output: PathBuf,
     },
+    /// Verify a downloaded model directory against trusted registry metadata.
+    Verify {
+        /// Registry model id, for example `sd15`.
+        model: String,
+        #[arg(long)]
+        model_dir: Option<PathBuf>,
+    },
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Family {
@@ -306,6 +313,15 @@ fn main() -> Result<()> {
         }
         Command::BakeVae { checkpoint, vae, output } => {
             diffusion_tools::bake_vae(&checkpoint, &vae, &output).map_err(anyhow::Error::msg)
+        }
+        Command::Verify { model, model_dir } => {
+            let model_dir = match model_dir {
+                Some(model_dir) => model_dir,
+                None => executable_dir()?.join("models").join(&model),
+            };
+            let report = diffusion_registry::verify(&model, &model_dir).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report.complete() { Ok(()) } else { bail!("model integrity verification failed") }
         }
     }
 }

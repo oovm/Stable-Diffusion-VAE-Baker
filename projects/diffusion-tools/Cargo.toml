@@ -20,6 +20,7 @@ rand = "0.9"
 image.workspace = true
 uuid.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+serde_json.workspace = true
 [[bin]]
 name = "sd"
 path = "src/main.rs"
