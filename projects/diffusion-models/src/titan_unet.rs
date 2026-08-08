@@ -43,6 +43,43 @@ struct TimeProjection {
     bias: CudaTensor,
 }
 
+/// SD 1.5 sinusoidal timestep embedding followed by the two learned layers.
+pub struct TitanTimeEmbedding {
+    first: TimeProjection,
+    second: TimeProjection,
+    context: CudaContext,
+}
+
+impl TitanTimeEmbedding {
+    /// Loads `time_embedding.linear_1` and `time_embedding.linear_2`.
+    pub fn from_model(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
+        let path = model_dir.join("unet/diffusion_pytorch_model.safetensors");
+        Ok(Self {
+            first: TimeProjection::load(&path, "time_embedding.linear_1", context)?,
+            second: TimeProjection::load(&path, "time_embedding.linear_2", context)?,
+            context: context.clone(),
+        })
+    }
+
+    /// Encodes one denoising timestep into the ResNet conditioning vector.
+    pub fn forward(&self, timestep: f32) -> Result<CudaTensor, String> {
+        let frequencies = 160usize;
+        let mut values = Vec::with_capacity(frequencies * 2);
+        for index in 0..frequencies {
+            let frequency = (-((10_000.0_f32).ln()) * index as f32 / (frequencies - 1) as f32).exp();
+            values.push((timestep * frequency).sin());
+        }
+        for index in 0..frequencies {
+            let frequency = (-((10_000.0_f32).ln()) * index as f32 / (frequencies - 1) as f32).exp();
+            values.push((timestep * frequency).cos());
+        }
+        let input = CudaTensor::from_slice(self.context.clone(), vec![1, frequencies * 2], &values)
+            .map_err(|error| format!("timestep upload: {error:?}"))?;
+        let hidden = self.first.forward(&input)?.silu().map_err(|error| format!("timestep SiLU: {error:?}"))?;
+        self.second.forward(&hidden)
+    }
+}
+
 impl TimeProjection {
     fn load(path: &Path, prefix: &str, context: &CudaContext) -> Result<Self, String> {
         let weight = load(path, &format!("{prefix}.weight"), context)?
@@ -157,5 +194,15 @@ mod tests {
         let output = block.forward(&input, &time).expect("Titan ResNet forward");
         assert_eq!(output.shape(), &[1, 320, 8, 8]);
         assert!(output.to_vec().expect("output download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_timestep_embedding_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("primary context");
+        let embedding = TitanTimeEmbedding::from_model(&model_dir, &context).expect("time embedding weights");
+        let output = embedding.forward(999.0).expect("timestep forward");
+        assert_eq!(output.shape(), &[1, 1280]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
