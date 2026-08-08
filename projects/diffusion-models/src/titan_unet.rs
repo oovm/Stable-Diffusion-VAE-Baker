@@ -4,7 +4,7 @@
 //! ResNet block shared by SD down, mid, and up blocks; attention and block
 //! graph wiring are layered on this contract.
 
-use crate::{F32Weight, load_f32_weight};
+use crate::{F32Weight, load_f32_weight, titan_attention::TitanSpatialTransformer};
 use std::path::Path;
 use titan_hal::CudaContext;
 use titan_tensor::{Conv2dOptions, CudaTensor};
@@ -227,6 +227,67 @@ impl TitanDownBlock {
     }
 }
 
+/// A cross-attention down block used by SD 1.5 blocks 1 and 2.
+pub struct TitanCrossAttnDownBlock {
+    first_resnet: TitanResnetBlock,
+    first_attention: TitanSpatialTransformer,
+    second_resnet: TitanResnetBlock,
+    second_attention: TitanSpatialTransformer,
+    downsample: Conv,
+}
+
+impl TitanCrossAttnDownBlock {
+    /// Loads the two ResNet/Transformer pairs and the stride-2 downsampler.
+    pub fn from_model(
+        model_dir: &Path,
+        block_index: usize,
+        input_channels: usize,
+        output_channels: usize,
+        context: &CudaContext,
+    ) -> Result<Self, String> {
+        let path = model_dir.join("unet/diffusion_pytorch_model.safetensors");
+        let prefix = format!("down_blocks.{block_index}");
+        Ok(Self {
+            first_resnet: TitanResnetBlock::from_model(
+                model_dir,
+                &format!("{prefix}.resnets.0"),
+                context,
+                input_channels,
+                output_channels,
+            )?,
+            first_attention: TitanSpatialTransformer::from_model(
+                model_dir,
+                &format!("{prefix}.attentions.0"),
+                output_channels,
+                context,
+            )?,
+            second_resnet: TitanResnetBlock::from_model(
+                model_dir,
+                &format!("{prefix}.resnets.1"),
+                context,
+                output_channels,
+                output_channels,
+            )?,
+            second_attention: TitanSpatialTransformer::from_model(
+                model_dir,
+                &format!("{prefix}.attentions.1"),
+                output_channels,
+                context,
+            )?,
+            downsample: Conv::load(&path, &format!("{prefix}.downsamplers.0.conv"), context)?,
+        })
+    }
+
+    /// Executes the complete cross-attention down block.
+    pub fn forward(&self, input: &CudaTensor, time: &CudaTensor, conditioning: &CudaTensor) -> Result<CudaTensor, String> {
+        let hidden = self.first_resnet.forward(input, time)?;
+        let hidden = self.first_attention.forward(&hidden, conditioning)?;
+        let hidden = self.second_resnet.forward(&hidden, time)?;
+        let hidden = self.second_attention.forward(&hidden, conditioning)?;
+        self.downsample.forward(&hidden, [2, 2], [1, 1])
+    }
+}
+
 impl TitanUnetStem {
     /// Loads `conv_in`, learned timestep layers, and `down_blocks.0.resnets.0`.
     pub fn from_model(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
@@ -319,6 +380,20 @@ mod tests {
         let input = CudaTensor::from_slice(context, vec![1, 320, 4, 4], &vec![0.0; 320 * 4 * 4]).expect("input");
         let output = block.forward(&input, &time).expect("down block forward");
         assert_eq!(output.shape(), &[1, 320, 2, 2]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_cross_attention_down_block_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("primary context");
+        let time =
+            TitanTimeEmbedding::from_model(&model_dir, &context).expect("time embedding").forward(999.0).expect("time forward");
+        let block = TitanCrossAttnDownBlock::from_model(&model_dir, 1, 320, 640, &context).expect("cross down block weights");
+        let input = CudaTensor::from_slice(context.clone(), vec![1, 320, 4, 4], &vec![0.0; 320 * 4 * 4]).expect("input");
+        let conditioning = CudaTensor::from_slice(context, vec![77, 768], &vec![0.0; 77 * 768]).expect("conditioning");
+        let output = block.forward(&input, &time, &conditioning).expect("cross down block forward");
+        assert_eq!(output.shape(), &[1, 640, 2, 2]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
