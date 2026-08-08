@@ -62,6 +62,44 @@ pub struct TitanVaeOutput {
     conv_out: Conv,
 }
 
+/// Complete SD 1.5 VAE decoder graph assembled from the native Titan blocks.
+pub struct TitanVaeDecoder {
+    stem: TitanVaeDecoderStem,
+    mid_first: TitanVaeResnetBlock,
+    mid_second: TitanVaeResnetBlock,
+    up_blocks: [TitanVaeUpBlock; 4],
+    output: TitanVaeOutput,
+}
+
+impl TitanVaeDecoder {
+    /// Loads the complete Diffusers decoder graph.
+    pub fn from_model_dir(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
+        Ok(Self {
+            stem: TitanVaeDecoderStem::from_model_dir(model_dir, context)?,
+            mid_first: TitanVaeResnetBlock::from_model(model_dir, "decoder.mid_block.resnets.0", 512, 512, context)?,
+            mid_second: TitanVaeResnetBlock::from_model(model_dir, "decoder.mid_block.resnets.1", 512, 512, context)?,
+            up_blocks: [
+                TitanVaeUpBlock::from_model(model_dir, 0, 512, 512, context)?,
+                TitanVaeUpBlock::from_model(model_dir, 1, 512, 512, context)?,
+                TitanVaeUpBlock::from_model(model_dir, 2, 512, 256, context)?,
+                TitanVaeUpBlock::from_model(model_dir, 3, 256, 128, context)?,
+            ],
+            output: TitanVaeOutput::from_model(model_dir, context)?,
+        })
+    }
+
+    /// Decodes a `[1,4,H,W]` latent into an RGB NCHW image tensor.
+    pub fn forward(&self, latent: &CudaTensor) -> Result<CudaTensor, String> {
+        let mut hidden = self.stem.forward(latent)?;
+        hidden = self.mid_first.forward(&hidden)?;
+        hidden = self.mid_second.forward(&hidden)?;
+        for block in &self.up_blocks {
+            hidden = block.forward(&hidden)?;
+        }
+        self.output.forward(&hidden)
+    }
+}
+
 impl TitanVaeOutput {
     /// Loads `decoder.conv_norm_out.*` and `decoder.conv_out.*`.
     pub fn from_model(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
@@ -254,6 +292,17 @@ mod tests {
         let input = CudaTensor::from_slice(context, vec![1, 128, 4, 4], &vec![0.0; 128 * 4 * 4]).expect("input");
         let output = output_head.forward(&input).expect("VAE RGB output");
         assert_eq!(output.shape(), &[1, 3, 4, 4]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_complete_real_sd15_vae_decoder_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("CUDA context");
+        let decoder = TitanVaeDecoder::from_model_dir(&model_dir, &context).expect("complete VAE decoder");
+        let latent = CudaTensor::from_slice(context, vec![1, 4, 1, 1], &vec![0.0; 4]).expect("latent");
+        let output = decoder.forward(&latent).expect("complete VAE decode");
+        assert_eq!(output.shape(), &[1, 3, 8, 8]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
