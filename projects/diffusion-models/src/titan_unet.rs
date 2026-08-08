@@ -214,16 +214,20 @@ impl TitanDownBlock {
 
     /// Runs both residual blocks and halves the spatial dimensions.
     pub fn forward(&self, input: &CudaTensor, time: &CudaTensor) -> Result<CudaTensor, String> {
-        let mut hidden = CudaTensor::from_slice(
-            input.context(),
-            input.shape().to_vec(),
-            &input.to_vec().map_err(|e| format!("down block input: {e:?}"))?,
-        )
-        .map_err(|e| format!("down block upload: {e:?}"))?;
+        Ok(self.forward_with_skips(input, time)?.0)
+    }
+
+    /// Runs the block and returns the two ResNet outputs plus downsample output.
+    pub fn forward_with_skips(&self, input: &CudaTensor, time: &CudaTensor) -> Result<(CudaTensor, Vec<CudaTensor>), String> {
+        let mut hidden = input.clone_device().map_err(|e| format!("down block input: {e:?}"))?;
+        let mut skips = Vec::with_capacity(3);
         for block in &self.resnets {
             hidden = block.forward(&hidden, time)?;
+            skips.push(hidden.clone_device().map_err(|e| format!("down skip: {e:?}"))?);
         }
-        self.downsample.forward(&hidden, [2, 2], [1, 1])
+        let downsampled = self.downsample.forward(&hidden, [2, 2], [1, 1])?;
+        skips.push(downsampled.clone_device().map_err(|e| format!("downsample skip: {e:?}"))?);
+        Ok((downsampled, skips))
     }
 }
 
@@ -253,8 +257,16 @@ impl TitanTerminalDownBlock {
 
     /// Executes the terminal down block without changing spatial resolution.
     pub fn forward(&self, input: &CudaTensor, time: &CudaTensor) -> Result<CudaTensor, String> {
+        Ok(self.forward_with_skips(input, time)?.0)
+    }
+
+    /// Runs the terminal block and returns both ResNet outputs.
+    pub fn forward_with_skips(&self, input: &CudaTensor, time: &CudaTensor) -> Result<(CudaTensor, Vec<CudaTensor>), String> {
         let hidden = self.first.forward(input, time)?;
-        self.second.forward(&hidden, time)
+        let skip0 = hidden.clone_device().map_err(|e| format!("terminal skip: {e:?}"))?;
+        let output = self.second.forward(&hidden, time)?;
+        let skip1 = output.clone_device().map_err(|e| format!("terminal skip: {e:?}"))?;
+        Ok((output, vec![skip0, skip1]))
     }
 }
 
@@ -485,11 +497,25 @@ impl TitanCrossAttnDownBlock {
 
     /// Executes the complete cross-attention down block.
     pub fn forward(&self, input: &CudaTensor, time: &CudaTensor, conditioning: &CudaTensor) -> Result<CudaTensor, String> {
+        Ok(self.forward_with_skips(input, time, conditioning)?.0)
+    }
+
+    /// Runs the block and returns its two attention outputs plus downsample output.
+    pub fn forward_with_skips(
+        &self,
+        input: &CudaTensor,
+        time: &CudaTensor,
+        conditioning: &CudaTensor,
+    ) -> Result<(CudaTensor, Vec<CudaTensor>), String> {
         let hidden = self.first_resnet.forward(input, time)?;
         let hidden = self.first_attention.forward(&hidden, conditioning)?;
+        let skip0 = hidden.clone_device().map_err(|e| format!("cross skip: {e:?}"))?;
         let hidden = self.second_resnet.forward(&hidden, time)?;
         let hidden = self.second_attention.forward(&hidden, conditioning)?;
-        self.downsample.forward(&hidden, [2, 2], [1, 1])
+        let skip1 = hidden.clone_device().map_err(|e| format!("cross skip: {e:?}"))?;
+        let downsampled = self.downsample.forward(&hidden, [2, 2], [1, 1])?;
+        let skip2 = downsampled.clone_device().map_err(|e| format!("cross downsample skip: {e:?}"))?;
+        Ok((downsampled, vec![skip0, skip1, skip2]))
     }
 }
 
