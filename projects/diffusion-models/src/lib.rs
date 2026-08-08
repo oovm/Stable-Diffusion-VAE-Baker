@@ -7,6 +7,8 @@ use std::{
     path::Path,
 };
 
+/// Native Diffusers spatial transformer blocks on Titan.
+pub mod titan_attention;
 /// Titan Driver API implementation of the SD 1.5 CLIP embedding stage.
 pub mod titan_clip;
 /// Native Stable Diffusion UNet building blocks on Titan.
