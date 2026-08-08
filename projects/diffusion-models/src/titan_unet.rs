@@ -4,7 +4,7 @@
 //! ResNet block shared by SD down, mid, and up blocks; attention and block
 //! graph wiring are layered on this contract.
 
-use crate::{load_f32_weight, F32Weight};
+use crate::{F32Weight, load_f32_weight};
 use std::path::Path;
 use titan_hal::CudaContext;
 use titan_tensor::{Conv2dOptions, CudaTensor};
@@ -127,5 +127,22 @@ impl TitanResnetBlock {
             .map_err(|error| format!("silu 2: {error:?}"))?;
         let hidden = self.conv2.forward(&hidden, [1, 1])?;
         residual.add(&hidden).map_err(|error| format!("resnet residual: {error:?}"))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::open_titan_cuda;
+
+    #[test]
+    fn loads_real_sd15_first_unet_resnet_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("primary context");
+        let block = TitanResnetBlock::from_model(&model_dir, "down_blocks.0.resnets.0", &context, 320, 320)
+            .expect("first SD15 ResNet weights");
+        assert_eq!(block.norm1_weight.shape(), &[320]);
+        assert_eq!(block.conv1.weight.shape(), &[320, 320, 3, 3]);
+        assert_eq!(block.time_projection.weight.shape(), &[1280, 320]);
     }
 }
