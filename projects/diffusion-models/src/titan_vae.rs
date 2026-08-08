@@ -300,9 +300,9 @@ mod tests {
         let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
         let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("CUDA context");
         let decoder = TitanVaeDecoder::from_model_dir(&model_dir, &context).expect("complete VAE decoder");
-        let latent = CudaTensor::from_slice(context, vec![1, 4, 1, 1], &vec![0.0; 4]).expect("latent");
+        let latent = CudaTensor::from_slice(context, vec![1, 4, 64, 64], &vec![0.0; 4 * 64 * 64]).expect("latent");
         let output = decoder.forward(&latent).expect("complete VAE decode");
-        assert_eq!(output.shape(), &[1, 3, 8, 8]);
+        assert_eq!(output.shape(), &[1, 3, 512, 512]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
