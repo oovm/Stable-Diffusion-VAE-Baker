@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 [dependencies]
 diffusion-types = { path = "../diffusion-types" }
-titan-hal = { git = "https://github.com/game-gpt/titan.rs.git", rev = "d3fda77", package = "titan-hal" }
-titan-tensor = { git = "https://github.com/game-gpt/titan.rs.git", rev = "d3fda77", package = "titan-tensor" }
+titan-hal = { git = "https://github.com/game-gpt/titan.rs.git", rev = "630d95a", package = "titan-hal" }
+titan-tensor = { git = "https://github.com/game-gpt/titan.rs.git", rev = "630d95a", package = "titan-tensor" }
 safetensors = "0.8.0"
 half = "2.7"
 serde_json.workspace = true
