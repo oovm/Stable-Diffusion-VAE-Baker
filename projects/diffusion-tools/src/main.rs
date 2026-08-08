@@ -19,6 +19,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Generate(GenerateArgs),
+    /// Tokenize a prompt and run the native Titan SD 1.5 CLIP text encoder.
+    TitanEncode {
+        /// Diffusers SD 1.5 directory containing tokenizer and text_encoder.
+        #[arg(long)]
+        model_dir: PathBuf,
+        #[arg(long)]
+        prompt: String,
+    },
     /// Download a well-known model with HTTP range resume support.
     Download {
         /// Registry model id, for example `sd15`.
@@ -60,6 +68,22 @@ enum Family {
     Sd21,
     Sdxl,
 }
+#[derive(Clone, Copy, ValueEnum)]
+enum DeviceKind {
+    Auto,
+    Cpu,
+    Cuda,
+}
+
+impl DeviceKind {
+    fn preference(self) -> diffusion_types::DevicePreference {
+        match self {
+            Self::Auto => diffusion_types::DevicePreference::Auto,
+            Self::Cpu => diffusion_types::DevicePreference::Cpu,
+            Self::Cuda => diffusion_types::DevicePreference::Cuda,
+        }
+    }
+}
 #[derive(Clone, Parser)]
 struct GenerateArgs {
     #[arg(long)]
@@ -70,6 +94,8 @@ struct GenerateArgs {
     negative_prompt: String,
     #[arg(long, value_enum, default_value_t = Family::Sd15)]
     family: Family,
+    #[arg(long, value_enum, default_value_t = DeviceKind::Auto)]
+    device: DeviceKind,
     #[arg(long, default_value_t = 512)]
     width: usize,
     #[arg(long, default_value_t = 512)]
@@ -95,7 +121,10 @@ struct GenerateArgs {
 }
 fn parse_lora(value: &str) -> std::result::Result<diffusion_types::LoraSpec, String> {
     let (path, weight) = value.rsplit_once(':').ok_or("LoRA must use PATH:WEIGHT")?;
-    Ok(diffusion_types::LoraSpec { path: PathBuf::from(path), weight: weight.parse().map_err(|_| "invalid LoRA weight".to_string())? })
+    Ok(diffusion_types::LoraSpec {
+        path: PathBuf::from(path),
+        weight: weight.parse().map_err(|_| "invalid LoRA weight".to_string())?,
+    })
 }
 fn path(root: &Path, relative: &str) -> Result<PathBuf> {
     let p = root.join(relative);
@@ -171,17 +200,38 @@ fn save(vae: &AutoEncoderKL, latents: &Tensor, scale: f64, output: &Path) -> Res
     candle_examples::save_image(&image, output)?;
     Ok(())
 }
+
+/// Resolves the public device flag through Titan's driver-only probe before
+/// handing the selected target to the legacy Candle pipeline.
+fn resolve_device(kind: DeviceKind) -> Result<Device> {
+    match diffusion_models::select_titan_device(kind.preference()) {
+        Ok(diffusion_models::TitanDevice::Cpu) => Ok(Device::Cpu),
+        Ok(diffusion_models::TitanDevice::Cuda(_context)) => Device::new_cuda(0).with_context(|| {
+            "Titan found an NVIDIA driver, but this legacy Candle pipeline has no CUDA backend; use the native Titan pipeline"
+        }),
+        Err(error) if matches!(kind, DeviceKind::Auto) => {
+            eprintln!("NVIDIA driver unavailable ({error:?}); falling back to CPU");
+            Ok(Device::Cpu)
+        }
+        Err(error) => Err(anyhow::anyhow!(
+            "failed to initialize Titan CUDA device 0 for --device cuda: {error:?}"
+        )),
+    }
+}
+
 fn generate(args: GenerateArgs) -> Result<u64> {
     if args.width % 64 != 0 || args.height % 64 != 0 {
         bail!("width and height must be multiples of 64")
     }
-    let device = Device::Cpu;
+    let device = resolve_device(args.device)?;
     let default_model = match args.family {
         Family::Sd15 => "sd15",
         Family::Sd21 => "sd21",
         Family::Sdxl => "sdxl",
     };
-    let model_dir = args.model_dir.clone().unwrap_or(executable_dir()?.join("models").join(default_model));
+    let model_dir = args.model_dir.clone().unwrap_or_else(|| {
+        executable_dir().expect("executable directory").join("models").join(default_model).join(default_model)
+    });
     if !args.loras.is_empty() || !args.embeddings.is_empty() || !args.controlnets.is_empty() || args.annotator.is_some() {
         bail!("LoRA, textual inversion and ControlNet inputs are parsed but not yet executable; refusing to ignore them");
     }
@@ -195,18 +245,25 @@ fn generate(args: GenerateArgs) -> Result<u64> {
     let unet = path(&model_dir, "unet/diffusion_pytorch_model.safetensors")?;
     let vae = path(&model_dir, "vae/diffusion_pytorch_model.safetensors")?;
     let text = if let Some(conditioning) = &args.conditioning {
-        let tensors = diffusion_extensions::load_conditioning(conditioning, &device)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let tensors =
+            diffusion_extensions::load_conditioning(conditioning, &device).map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let positive = tensors.get("prompt_embeds").context("conditioning missing prompt_embeds")?;
         let negative = tensors.get("negative_prompt_embeds").context("conditioning missing negative_prompt_embeds")?;
         if positive.dims() != negative.dims() || positive.rank() != 3 || positive.dim(0)? != 1 {
             bail!("conditioning prompt tensors must have matching shape [1, sequence, hidden]");
         }
         let hidden = positive.dim(2)?;
-        let expected = match args.family { Family::Sd15 => 768, Family::Sd21 => 1024, Family::Sdxl => 2048 };
-        if hidden != expected { bail!("conditioning hidden size {hidden} does not match model family (expected {expected})"); }
+        let expected = match args.family {
+            Family::Sd15 => 768,
+            Family::Sd21 => 1024,
+            Family::Sdxl => 2048,
+        };
+        if hidden != expected {
+            bail!("conditioning hidden size {hidden} does not match model family (expected {expected})");
+        }
         Tensor::cat(&[negative, positive], 0)?.to_dtype(dtype)?
-    } else {
+    }
+    else {
         embeddings(&config, &model_dir, &args.prompt, &args.negative_prompt, &device, dtype)?
     };
     let vae = config.build_vae(vae, &device, dtype)?;
@@ -231,6 +288,22 @@ fn generate(args: GenerateArgs) -> Result<u64> {
     println!("seed={seed} image={}", args.output.display());
     Ok(seed)
 }
+
+fn titan_encode(model_dir: &Path, prompt: &str) -> Result<()> {
+    let tokenizer_path = path(model_dir, "tokenizer/tokenizer.json")?;
+    let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(anyhow::Error::msg)?;
+    let token_ids = diffusion_tools::tokenize_titan_sd15_prompt(&tokenizer, prompt).map_err(anyhow::Error::msg)?;
+    let context = match diffusion_models::select_titan_device(diffusion_types::DevicePreference::Cuda) {
+        Ok(diffusion_models::TitanDevice::Cuda(context)) => context,
+        Ok(diffusion_models::TitanDevice::Cpu) => bail!("native Titan CLIP requires an NVIDIA CUDA device"),
+        Err(error) => bail!("failed to initialize native Titan CUDA device 0: {error:?}"),
+    };
+    let encoder =
+        diffusion_models::titan_clip::TitanClipEncoder::from_model_dir(model_dir, context).map_err(anyhow::Error::msg)?;
+    let conditioning = encoder.encode(&token_ids).map_err(anyhow::Error::msg)?;
+    println!("Titan SD 1.5 CLIP conditioning shape: {:?}", conditioning.shape());
+    Ok(())
+}
 #[derive(Clone)]
 struct LocalPipeline {
     model_dir: PathBuf,
@@ -254,6 +327,7 @@ impl diffusion_types::DiffusionPipeline for LocalPipeline {
             prompt: request.prompt.clone(),
             negative_prompt: request.negative_prompt.clone().unwrap_or_default(),
             family: self.family,
+            device: DeviceKind::Auto,
             width: request.width as usize,
             height: request.height as usize,
             steps: request.steps as usize,
@@ -262,7 +336,11 @@ impl diffusion_types::DiffusionPipeline for LocalPipeline {
             loras: request.loras.clone(),
             embeddings: request.embeddings.iter().map(|e| e.path.clone()).collect(),
             conditioning: request.conditioning.as_ref().map(|c| c.path.clone()),
-            controlnets: request.controlnets.iter().map(|c| format!("{}:{}:{}:{}:{}", c.model.display(), c.image.display(), c.weight, c.start, c.end)).collect(),
+            controlnets: request
+                .controlnets
+                .iter()
+                .map(|c| format!("{}:{}:{}:{}:{}", c.model.display(), c.image.display(), c.weight, c.start, c.end))
+                .collect(),
             annotator: request.annotator.as_ref().map(|a| a.name.clone()),
             output: output.clone(),
         };
@@ -278,9 +356,11 @@ fn main() -> Result<()> {
             generate(args)?;
             Ok(())
         }
+        Command::TitanEncode { model_dir, prompt } => titan_encode(&model_dir, &prompt),
         Command::Download { model, output_dir } => {
             let output_dir = output_dir.unwrap_or(executable_dir()?.join("models"));
-            let metadata = diffusion_registry::download(&model, output_dir.join(&model))?;
+            let destination = diffusion_registry::model_dir(&output_dir, &model)?;
+            let metadata = diffusion_registry::download(&model, destination)?;
             println!(
                 "{} download metadata written; complete={}",
                 metadata.model.display_name,
@@ -295,13 +375,14 @@ fn main() -> Result<()> {
                 Family::Sd21 => "sd21",
                 Family::Sdxl => "sdxl",
             };
-            let model_dir = model_dir.unwrap_or_else(|| executable_dir.join("models").join(default_model));
+            let model_dir = model_dir.unwrap_or_else(|| executable_dir.join("models").join(default_model).join(default_model));
             let output_dir = output_dir.unwrap_or_else(|| executable_dir.join("outputs"));
             let pages_dir = pages_dir.unwrap_or_else(|| executable_dir.join("pages"));
             let pipeline = Arc::new(LocalPipeline { model_dir, output_dir, family });
             let state = diffusion_server::AppState {
                 tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
                 pipeline: Some(pipeline),
+                mode: "local".into(),
             };
             println!("sd listening on http://{address}");
             tokio::runtime::Runtime::new()?.block_on(diffusion_server::serve(state, address, pages_dir))?;

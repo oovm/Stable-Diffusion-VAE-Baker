@@ -1,7 +1,6 @@
 use candle_core::{Device, Tensor};
 use diffuser_edit::bake_vae_by_path;
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 #[test]
 fn ready() {

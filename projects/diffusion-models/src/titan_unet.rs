@@ -532,9 +532,87 @@ impl TitanUnetStem {
 
     /// Runs `[1,4,H,W]` latent input through the first UNet residual block.
     pub fn forward(&self, latent: &CudaTensor, timestep: f32) -> Result<CudaTensor, String> {
-        let hidden = self.conv_in.forward(latent, [1, 1], [1, 1])?;
+        let hidden = self.encode_input(latent)?;
         let time = self.time_embedding.forward(timestep)?;
         self.first_resnet.forward(&hidden, &time)
+    }
+
+    /// Applies only the UNet input convolution, preserving the initial skip feature.
+    pub fn encode_input(&self, latent: &CudaTensor) -> Result<CudaTensor, String> {
+        self.conv_in.forward(latent, [1, 1], [1, 1])
+    }
+
+    /// Encodes one timestep for all ResNet blocks in this UNet.
+    pub fn encode_time(&self, timestep: f32) -> Result<CudaTensor, String> {
+        self.time_embedding.forward(timestep)
+    }
+}
+
+/// Complete SD 1.5 UNet graph assembled from the native Titan blocks.
+pub struct TitanUnet {
+    stem: TitanUnetStem,
+    down0: TitanDownBlock,
+    down1: TitanCrossAttnDownBlock,
+    down2: TitanCrossAttnDownBlock,
+    down3: TitanTerminalDownBlock,
+    mid: TitanMidBlock,
+    up0: TitanUpBlock,
+    up1: TitanAttnUpBlock,
+    up2: TitanAttnUpBlock,
+    up3: TitanAttnUpBlock,
+    output: TitanUnetOutput,
+}
+
+impl TitanUnet {
+    /// Loads the full SD 1.5 UNet graph and its real Diffusers weights.
+    pub fn from_model_dir(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
+        Ok(Self {
+            stem: TitanUnetStem::from_model(model_dir, context)?,
+            down0: TitanDownBlock::from_model(model_dir, 0, 320, 320, context)?,
+            down1: TitanCrossAttnDownBlock::from_model(model_dir, 1, 320, 640, context)?,
+            down2: TitanCrossAttnDownBlock::from_model(model_dir, 2, 640, 1280, context)?,
+            down3: TitanTerminalDownBlock::from_model(model_dir, context)?,
+            mid: TitanMidBlock::from_model(model_dir, context)?,
+            up0: TitanUpBlock::from_model(model_dir, context)?,
+            up1: TitanAttnUpBlock::from_model(model_dir, 1, 1280, [2560, 2560, 1920], context)?,
+            up2: TitanAttnUpBlock::from_model(model_dir, 2, 640, [1920, 1280, 960], context)?,
+            up3: TitanAttnUpBlock::from_model(model_dir, 3, 320, [960, 640, 640], context)?,
+            output: TitanUnetOutput::from_model(model_dir, context)?,
+        })
+    }
+
+    /// Runs the complete conditioned UNet graph on one latent batch.
+    pub fn forward(&self, latent: &CudaTensor, timestep: f32, conditioning: &CudaTensor) -> Result<CudaTensor, String> {
+        let mut hidden = self.stem.encode_input(latent)?;
+        let time = self.stem.encode_time(timestep)?;
+        let mut skips = vec![hidden.clone_device().map_err(|e| format!("stem skip: {e:?}"))?];
+        let (next, mut values) = self.down0.forward_with_skips(&hidden, &time)?;
+        skips.append(&mut values);
+        hidden = next;
+        let (next, mut values) = self.down1.forward_with_skips(&hidden, &time, conditioning)?;
+        skips.append(&mut values);
+        hidden = next;
+        let (next, mut values) = self.down2.forward_with_skips(&hidden, &time, conditioning)?;
+        skips.append(&mut values);
+        hidden = next;
+        let (next, mut values) = self.down3.forward_with_skips(&hidden, &time)?;
+        skips.append(&mut values);
+        hidden = self.mid.forward(&next, &time, conditioning)?;
+        let take3 = |stack: &mut Vec<CudaTensor>| -> Result<[CudaTensor; 3], String> {
+            let a = stack.pop().ok_or("UNet skip underflow")?;
+            let b = stack.pop().ok_or("UNet skip underflow")?;
+            let c = stack.pop().ok_or("UNet skip underflow")?;
+            Ok([a, b, c])
+        };
+        let s = take3(&mut skips)?;
+        hidden = self.up0.forward(&hidden, [&s[0], &s[1], &s[2]], &time, conditioning)?;
+        let s = take3(&mut skips)?;
+        hidden = self.up1.forward(&hidden, [&s[0], &s[1], &s[2]], &time, conditioning)?;
+        let s = take3(&mut skips)?;
+        hidden = self.up2.forward(&hidden, [&s[0], &s[1], &s[2]], &time, conditioning)?;
+        let s = take3(&mut skips)?;
+        hidden = self.up3.forward(&hidden, [&s[0], &s[1], &s[2]], &time, conditioning)?;
+        self.output.forward(&hidden)
     }
 }
 
@@ -697,6 +775,20 @@ mod tests {
         let input = CudaTensor::from_slice(context, vec![1, 320, 4, 4], &vec![0.0; 320 * 4 * 4]).expect("input");
         let output = output_head.forward(&input).expect("UNet output head");
         assert_eq!(output.shape(), &[1, 4, 4, 4]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_complete_real_sd15_unet_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("CUDA context");
+        let unet = TitanUnet::from_model_dir(&model_dir, &context).expect("complete UNet graph");
+        // Keep enough spatial resolution for the four SD down/up stages to
+        // retain the same skip-resolution relationships as a real latent.
+        let latent = CudaTensor::from_slice(context.clone(), vec![1, 4, 16, 16], &vec![0.0; 4 * 16 * 16]).expect("latent");
+        let conditioning = CudaTensor::from_slice(context, vec![77, 768], &vec![0.0; 77 * 768]).expect("conditioning");
+        let output = unet.forward(&latent, 999.0, &conditioning).expect("complete UNet forward");
+        assert_eq!(output.shape(), &[1, 4, 16, 16]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }

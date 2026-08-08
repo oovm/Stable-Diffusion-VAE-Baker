@@ -1,5 +1,4 @@
 //! Shared public types for the lightweight diffusion workspace.
-use candle_core::{DType, Device};
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -27,6 +26,15 @@ pub enum ModelFamily {
     Sd15,
     Sd21,
     Sdxl,
+}
+/// Runtime backend selection exposed by the single `sd.exe` binary.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DevicePreference {
+    #[default]
+    Auto,
+    Cpu,
+    Cuda,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRef {
@@ -106,7 +114,11 @@ impl GenerationRequest {
             return Err(DiffusionError::InvalidRequest("steps must be positive and guidance_scale finite".into()));
         }
         for control in &self.controlnets {
-            if !control.weight.is_finite() || !(0.0..=1.0).contains(&control.start) || !(0.0..=1.0).contains(&control.end) || control.start > control.end {
+            if !control.weight.is_finite()
+                || !(0.0..=1.0).contains(&control.start)
+                || !(0.0..=1.0).contains(&control.end)
+                || control.start > control.end
+            {
                 return Err(DiffusionError::InvalidRequest("invalid ControlNet weight or step range".into()));
             }
         }
@@ -139,22 +151,23 @@ pub trait DiffusionPipeline: Send + Sync {
         cancel: &CancellationToken,
     ) -> Result<GenerationResult>;
 }
-pub fn select_device(name: Option<&str>) -> Result<(Device, DType)> {
-    match name.unwrap_or("cpu") {
-        "cpu" => Ok((Device::Cpu, DType::F32)),
-        other => Err(DiffusionError::Model(format!("backend `{other}` is not enabled in this build"))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn rejects_invalid_control_range() {
         let mut request = GenerationRequest::default();
-        request.controlnets.push(ControlNetSpec { model: PathBuf::from("control.safetensors"), image: PathBuf::from("control.png"), weight: 1.0, start: 0.8, end: 0.2 });
+        request.controlnets.push(ControlNetSpec {
+            model: PathBuf::from("control.safetensors"),
+            image: PathBuf::from("control.png"),
+            weight: 1.0,
+            start: 0.8,
+            end: 0.2,
+        });
         assert!(request.validate().is_err());
     }
     #[test]
-    fn accepts_default_request() { assert!(GenerationRequest::default().validate().is_ok()); }
+    fn accepts_default_request() {
+        assert!(GenerationRequest::default().validate().is_ok());
+    }
 }

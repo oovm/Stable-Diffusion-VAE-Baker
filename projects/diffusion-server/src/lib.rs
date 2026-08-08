@@ -10,12 +10,13 @@ use diffusion_types::{CancellationToken, DiffusionPipeline, GenerationRequest, P
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
-use tower_http::services::ServeDir;
+use tower_http::{cors::CorsLayer, services::ServeDir};
 use uuid::Uuid;
 #[derive(Clone)]
 pub struct AppState {
     pub tasks: Arc<RwLock<HashMap<Uuid, TaskStatus>>>,
     pub pipeline: Option<Arc<dyn DiffusionPipeline>>,
+    pub mode: String,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "status", content = "detail")]
@@ -54,10 +55,15 @@ fn default_cfg() -> f32 {
 pub fn router(state: AppState, pages_dir: std::path::PathBuf) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/api/runtime", get(runtime))
         .route("/v1/images/generations", post(generate))
         .route("/v1/tasks/:id", get(task))
         .fallback_service(ServeDir::new(pages_dir).append_index_html_on_directories(true))
+        .layer(CorsLayer::permissive())
         .with_state(state)
+}
+async fn runtime(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({"mode": state.mode, "backend": "sd", "local": true}))
 }
 struct NoProgress;
 impl ProgressSink for NoProgress {
@@ -66,7 +72,10 @@ impl ProgressSink for NoProgress {
 async fn generate(State(state): State<AppState>, Json(input): Json<ImageRequest>) -> impl IntoResponse {
     let id = Uuid::new_v4();
     if input.extra_body.is_some() {
-        return (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"error":"extra_body extensions are not enabled in this build"})));
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({"error":"extra_body extensions are not enabled in this build"})),
+        );
     }
     let (width, height) = match input.size.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
         Some(v) => v,
@@ -120,5 +129,5 @@ pub async fn serve(state: AppState, address: std::net::SocketAddr, pages_dir: st
     axum::serve(listener, router(state, pages_dir)).await.map_err(std::io::Error::other)
 }
 pub fn empty_state() -> AppState {
-    AppState { tasks: Arc::new(RwLock::new(HashMap::new())), pipeline: None }
+    AppState { tasks: Arc::new(RwLock::new(HashMap::new())), pipeline: None, mode: "local".into() }
 }

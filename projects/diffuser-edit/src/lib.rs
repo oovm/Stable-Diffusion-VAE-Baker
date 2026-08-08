@@ -10,7 +10,9 @@ mod vae;
 
 mod preprocessing;
 
-pub use crate::errors::{ExampleError, ExampleErrorKind, Result};
-pub use crate::preprocessing::ImageProcessing;
+pub use crate::{
+    errors::{ExampleError, ExampleErrorKind, Result},
+    preprocessing::ImageProcessing,
+};
 
 pub use self::vae::{bake_vae, bake_vae_by_path};

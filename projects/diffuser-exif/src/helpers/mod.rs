@@ -1,9 +1,10 @@
-use std::fs::{self, File};
-use std::io::BufReader;
+use std::{
+    fs::{self, File},
+    io::BufReader,
+};
 
 use image::ImageError;
-use img_parts::png::Png;
-use img_parts::{Bytes, ImageEXIF, ImageICC};
+use img_parts::{Bytes, ImageEXIF, ImageICC, png::Png};
 
 fn read_exif_from_png(image_path: &str) -> Result<(), ImageError> {
     // 读取图片文件

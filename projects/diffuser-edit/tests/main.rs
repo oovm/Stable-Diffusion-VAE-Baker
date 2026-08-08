@@ -1,6 +1,5 @@
 use safetensors::SafeTensors;
-use std::error::Error;
-use std::path::Path;
+use std::{error::Error, path::Path};
 
 #[test]
 fn ready() {
@@ -24,7 +23,6 @@ pub fn sign_model(path: &str, path2: &Path) -> Result<(), Box<dyn Error>> {
     };
     meta.insert("ss_author".to_string(), "https://civitai.com/user/XEZ".to_string());
     safetensors::serialize_to_file(safetensors.tensors(), Some(meta), path2)?;
-    //
     // println!("SafeTensors Metadata:");
     // for (key, metadata) in meta.metadata().clone().unwrap() {
     //     println!("{}: {:?}", key, metadata);

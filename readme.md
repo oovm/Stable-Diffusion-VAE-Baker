@@ -31,16 +31,43 @@ projects/
 
 ## 运行目录
 
-打包后，`models/`、`outputs/`、`pages/` 默认位于 `sd.exe` 同目录：
+打包后，`sd.exe` 和 `sd-gui.exe` 共用同一个单机运行目录：
 
 ```text
-sd.exe/
+sd-runtime/
   sd.exe
-  models/
-    sd15/
-  outputs/
+  sd-gui.exe
+  config.json
   pages/
+  models/
+    <model-slug>/<model-id>/
+  outputs/
 ```
+
+`sd-gui.exe` 是 Tauri/WebView2 桌面壳：它会创建运行目录、启动同目录的 `sd.exe serve`，并在原生窗口内嵌 WebUI。模型下载使用同样的目录契约，例如 `sd download sd15` 写入 `models/sd15/sd15/`。
+
+## WebUI 部署模式
+
+WebUI 和生成后端通过 HTTP API 通信，前端可在运行时设置 Backend URL 并保存到浏览器 localStorage。
+
+1. 前后端分离：独立部署 `pages/`，将 Backend URL 设为本机 `http://127.0.0.1:3000` 或远程 `https://example.com`。
+2. 后端捆绑暴露：使用 `sd serve --pages-dir .\pages`，Axum 同时提供 API 和同源 WebUI。
+3. Tauri 单机应用：使用 `sd-gui.exe`，Tauri 启动本机 `sd.exe`，并用 Windows WebView2 内嵌 `http://127.0.0.1:3000`。
+
+后端公开 `/api/runtime` 用于识别 local 运行时，并允许 WebUI 跨域调用 `/v1/images/generations`，使独立前端可连接远程后端。
+
+`sd-gui.exe` 首次启动时会在运行目录创建 `config.json`，默认使用 local。切换 remote 时停止 GUI，编辑该文件后重新启动：
+
+```json
+{
+  "backend": {
+    "mode": "remote",
+    "url": "https://sd-backend.example.com"
+  }
+}
+```
+
+可复制 [local 配置示例](projects/diffusion-gui/config.local.example.json) 或 [remote 配置示例](projects/diffusion-gui/config.remote.example.json) 到发行目录并命名为 `config.json`。
 
 模型目录说明见 [models/README.md](models/README.md)，输出目录说明见 [outputs/README.md](outputs/README.md)。模型权重和生成图片已加入 Git ignore，只保留 `.gitkeep` 和说明文档。
 
@@ -58,7 +85,7 @@ cargo test -p diffusion-types -p diffusion-extensions
 .\target\release\sd.exe download sd15 --output-dir E:\models
 ```
 
-默认不指定 `--output-dir` 时，模型写入 `sd.exe` 同目录的 `models/`。
+默认不指定 `--output-dir` 时，模型写入 `sd.exe` 同目录的 `models/<model-slug>/<model-id>/`。
 
 ## 生成图片
 

@@ -4,7 +4,8 @@ use safetensors::{SafeTensors, tensor::Dtype};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock, RwLock},
 };
 
 /// Native Diffusers spatial transformer blocks on Titan.
@@ -15,6 +16,8 @@ pub mod titan_clip;
 pub mod titan_unet;
 /// Native SD 1.5 VAE decoder stages on Titan.
 pub mod titan_vae;
+/// Device-resident SD 1.5 DDIM scheduler.
+pub mod titan_scheduler;
 
 /// Opens a CUDA Driver API session through the Titan Git dependency.
 ///
@@ -158,10 +161,27 @@ pub struct F32Weight {
     pub values: Vec<f32>,
 }
 
+// Reuse the immutable safetensors file buffer while assembling a native
+// pipeline. Re-reading a multi-gigabyte file for every tensor exhausts Windows
+// process resources before the complete SD15 UNet can be constructed.
+fn safetensor_file_cache() -> &'static RwLock<std::collections::HashMap<PathBuf, Arc<Vec<u8>>>> {
+    static CACHE: OnceLock<RwLock<std::collections::HashMap<PathBuf, Arc<Vec<u8>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
+}
+
+fn cached_safetensor_bytes(path: &Path) -> Result<Arc<Vec<u8>>> {
+    if let Some(bytes) = safetensor_file_cache().read().expect("safetensor cache poisoned").get(path).cloned() {
+        return Ok(bytes);
+    }
+    let bytes = Arc::new(fs::read(path).map_err(|error| DiffusionError::Model(format!("{}: {error}", path.display())))?);
+    let mut cache = safetensor_file_cache().write().expect("safetensor cache poisoned");
+    Ok(cache.entry(path.to_path_buf()).or_insert_with(|| bytes.clone()).clone())
+}
+
 /// Loads one F32, F16, or BF16 safetensors tensor and validates its byte size.
 pub fn load_f32_weight(path: &Path, name: &str) -> Result<F32Weight> {
-    let bytes = fs::read(path).map_err(|error| DiffusionError::Model(format!("{}: {error}", path.display())))?;
-    let tensors = SafeTensors::deserialize(&bytes).map_err(|error| DiffusionError::Model(error.to_string()))?;
+    let bytes = cached_safetensor_bytes(path)?;
+    let tensors = SafeTensors::deserialize(bytes.as_slice()).map_err(|error| DiffusionError::Model(error.to_string()))?;
     let tensor = tensors.tensor(name).map_err(|error| DiffusionError::Model(format!("{name}: {error}")))?;
     let count = tensor
         .shape()

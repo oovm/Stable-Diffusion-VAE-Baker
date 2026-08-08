@@ -9,6 +9,7 @@ members = [
     "projects/diffusion-extensions",
     "projects/diffusion-tools",
     "projects/diffusion-server",
+    "projects/diffusion-gui",
 ]
 default-members = [
     "projects/diffuser-edit",

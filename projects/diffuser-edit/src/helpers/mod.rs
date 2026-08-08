@@ -1,8 +1,6 @@
 use candle_core::{DType, Device, Tensor};
 use image::{DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgb, RgbImage};
-use std::error::Error;
-use std::fs;
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, error::Error, fs, path::Path};
 
 use walkdir::WalkDir;
 

@@ -177,6 +177,12 @@ pub fn well_known(id: &str) -> Result<ModelSource> {
     }
 }
 
+/// Returns the canonical runtime directory, `models/<family>/<canonical-id>`.
+pub fn model_dir(root: impl AsRef<Path>, id: &str) -> Result<PathBuf> {
+    let model = well_known(id)?;
+    Ok(root.as_ref().join(&model.family).join(&model.id))
+}
+
 fn download_file(client: Client, source: SourceFile, output: &Path, progress: Arc<MultiProgress>) -> Result<DownloadFile> {
     let destination = output.join(&source.path);
     if let Some(parent) = destination.parent() {

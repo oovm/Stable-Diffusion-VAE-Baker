@@ -1,9 +1,11 @@
 use image::{DynamicImage, GenericImageView, ImageBuffer, ImageError, ImageFormat, Rgb, RgbImage};
-use std::error::Error;
-use std::ffi::OsStr;
-use std::fs::File;
-use std::path::Path;
-use std::sync::mpsc::{Receiver, SendError, Sender};
+use std::{
+    error::Error,
+    ffi::OsStr,
+    fs::File,
+    path::Path,
+    sync::mpsc::{Receiver, SendError, Sender},
+};
 use walkdir::WalkDir;
 
 #[derive(Copy, Clone, Debug)]
@@ -64,7 +66,8 @@ impl ImageProcessing {
             // Remove the original file
             std::fs::remove_file(path)?;
             println!("Converted and deleted: {:?}", path);
-        } else {
+        }
+        else {
             println!("Converted: {:?}", path);
         }
         Ok(())
