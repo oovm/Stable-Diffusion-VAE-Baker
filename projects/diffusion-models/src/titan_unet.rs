@@ -257,6 +257,35 @@ pub struct TitanAttnUpBlock {
     input_channels: [usize; 3],
 }
 
+/// The final SD 1.5 UNet normalization, activation, and four-channel output head.
+pub struct TitanUnetOutput {
+    norm_weight: CudaTensor,
+    norm_bias: CudaTensor,
+    conv_out: Conv,
+}
+
+impl TitanUnetOutput {
+    /// Loads `conv_norm_out.*` and `conv_out.*` from the Diffusers UNet.
+    pub fn from_model(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
+        let path = model_dir.join("unet/diffusion_pytorch_model.safetensors");
+        Ok(Self {
+            norm_weight: load(&path, "conv_norm_out.weight", context)?,
+            norm_bias: load(&path, "conv_norm_out.bias", context)?,
+            conv_out: Conv::load(&path, "conv_out", context)?,
+        })
+    }
+
+    /// Converts the final 320-channel decoder feature map into noise channels.
+    pub fn forward(&self, input: &CudaTensor) -> Result<CudaTensor, String> {
+        let hidden = input
+            .group_norm_nchw(32, &self.norm_weight, &self.norm_bias, 1e-5)
+            .map_err(|e| format!("UNet output norm: {e:?}"))?
+            .silu()
+            .map_err(|e| format!("UNet output SiLU: {e:?}"))?;
+        self.conv_out.forward(&hidden, [1, 1], [1, 1])
+    }
+}
+
 impl TitanAttnUpBlock {
     /// Loads one attention up block using the actual per-stage channel widths.
     pub fn from_model(
@@ -596,6 +625,17 @@ mod tests {
         let conditioning = CudaTensor::from_slice(context, vec![77, 768], &vec![0.0; 77 * 768]).expect("conditioning");
         let output = block.forward(&input, [&skip1, &skip2, &skip3], &time, &conditioning).expect("up3 forward");
         assert_eq!(output.shape(), &[1, 320, 2, 2]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_unet_output_head_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("CUDA context");
+        let output_head = TitanUnetOutput::from_model(&model_dir, &context).expect("UNet output weights");
+        let input = CudaTensor::from_slice(context, vec![1, 320, 4, 4], &vec![0.0; 320 * 4 * 4]).expect("input");
+        let output = output_head.forward(&input).expect("UNet output head");
+        assert_eq!(output.shape(), &[1, 4, 4, 4]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
