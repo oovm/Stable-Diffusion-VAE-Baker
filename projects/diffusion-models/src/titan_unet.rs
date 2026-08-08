@@ -205,4 +205,16 @@ mod tests {
         assert_eq!(output.shape(), &[1, 1280]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
+
+    #[test]
+    fn connects_real_sd15_timestep_to_first_resnet_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("primary context");
+        let time = TitanTimeEmbedding::from_model(&model_dir, &context).expect("time embedding").forward(999.0).expect("time forward");
+        let block = TitanResnetBlock::from_model(&model_dir, "down_blocks.0.resnets.0", &context, 320, 320).expect("resnet");
+        let input = CudaTensor::from_slice(context, vec![1, 320, 4, 4], &vec![0.0; 320 * 4 * 4]).expect("input");
+        let output = block.forward(&input, &time).expect("conditioned ResNet");
+        assert_eq!(output.shape(), &[1, 320, 4, 4]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
 }
