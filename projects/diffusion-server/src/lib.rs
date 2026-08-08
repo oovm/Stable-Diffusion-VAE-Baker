@@ -10,6 +10,7 @@ use diffusion_types::{CancellationToken, DiffusionPipeline, GenerationRequest, P
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
+use tower_http::services::ServeDir;
 use uuid::Uuid;
 #[derive(Clone)]
 pub struct AppState {
@@ -38,6 +39,8 @@ pub struct ImageRequest {
     pub cfg_scale: f32,
     #[serde(default)]
     pub seed: Option<u64>,
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Value>,
 }
 fn default_size() -> String {
     "512x512".into()
@@ -48,11 +51,12 @@ fn default_steps() -> u32 {
 fn default_cfg() -> f32 {
     7.5
 }
-pub fn router(state: AppState) -> Router {
+pub fn router(state: AppState, pages_dir: std::path::PathBuf) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/v1/images/generations", post(generate))
         .route("/v1/tasks/:id", get(task))
+        .fallback_service(ServeDir::new(pages_dir).append_index_html_on_directories(true))
         .with_state(state)
 }
 struct NoProgress;
@@ -61,11 +65,14 @@ impl ProgressSink for NoProgress {
 }
 async fn generate(State(state): State<AppState>, Json(input): Json<ImageRequest>) -> impl IntoResponse {
     let id = Uuid::new_v4();
+    if input.extra_body.is_some() {
+        return (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"error":"extra_body extensions are not enabled in this build"})));
+    }
     let (width, height) = match input.size.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
         Some(v) => v,
         None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"size must be WIDTHxHEIGHT"}))),
     };
-    state.tasks.write().await.insert(id, TaskStatus::Running);
+    state.tasks.write().await.insert(id, TaskStatus::Queued);
     let request = GenerationRequest {
         prompt: input.prompt,
         negative_prompt: input.negative_prompt,
@@ -74,8 +81,16 @@ async fn generate(State(state): State<AppState>, Json(input): Json<ImageRequest>
         steps: input.steps,
         guidance_scale: input.cfg_scale,
         seed: input.seed,
+        loras: vec![],
+        embeddings: vec![],
+        conditioning: None,
+        controlnets: vec![],
+        annotator: None,
         ..Default::default()
     };
+    if let Err(error) = request.validate() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": error.to_string()})));
+    }
     let pipeline = match state.pipeline.clone() {
         Some(pipeline) => pipeline,
         None => {
@@ -83,16 +98,16 @@ async fn generate(State(state): State<AppState>, Json(input): Json<ImageRequest>
             return (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"id": id, "error":"no pipeline configured"})));
         }
     };
-    match pipeline.generate(&request, &NoProgress, &CancellationToken::default()) {
-        Ok(result) => {
-            state.tasks.write().await.insert(id, TaskStatus::Completed { seed: result.seed });
-            (StatusCode::OK, Json(serde_json::json!({"id": id, "status":"completed", "seed": result.seed})))
-        }
-        Err(error) => {
-            state.tasks.write().await.insert(id, TaskStatus::Failed(error.to_string()));
-            (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"id": id, "error":error.to_string()})))
-        }
-    }
+    let tasks = state.tasks.clone();
+    tokio::task::spawn_blocking(move || {
+        tasks.blocking_write().insert(id, TaskStatus::Running);
+        let status = match pipeline.generate(&request, &NoProgress, &CancellationToken::default()) {
+            Ok(result) => TaskStatus::Completed { seed: result.seed },
+            Err(error) => TaskStatus::Failed(error.to_string()),
+        };
+        tasks.blocking_write().insert(id, status);
+    });
+    (StatusCode::ACCEPTED, Json(serde_json::json!({"id": id, "status":"queued"})))
 }
 async fn task(State(state): State<AppState>, Path(id): Path<Uuid>) -> impl IntoResponse {
     match state.tasks.read().await.get(&id) {
@@ -100,9 +115,9 @@ async fn task(State(state): State<AppState>, Path(id): Path<Uuid>) -> impl IntoR
         None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"unknown task"}))),
     }
 }
-pub async fn serve(state: AppState, address: std::net::SocketAddr) -> std::io::Result<()> {
+pub async fn serve(state: AppState, address: std::net::SocketAddr, pages_dir: std::path::PathBuf) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, router(state)).await.map_err(std::io::Error::other)
+    axum::serve(listener, router(state, pages_dir)).await.map_err(std::io::Error::other)
 }
 pub fn empty_state() -> AppState {
     AppState { tasks: Arc::new(RwLock::new(HashMap::new())), pipeline: None }

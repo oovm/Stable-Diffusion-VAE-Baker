@@ -3,7 +3,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::{
     StatusCode,
     blocking::{Client, Response},
-    header::{CONTENT_RANGE, RANGE},
+    header::{AUTHORIZATION, CONTENT_RANGE, HeaderValue, RANGE},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -57,8 +57,17 @@ pub struct DownloadMetadata {
     pub files: Vec<DownloadFile>,
 }
 
+fn source(path: &str, url: &str, expected_bytes: Option<u64>) -> SourceFile {
+    SourceFile { path: path.into(), url: url.into(), expected_bytes }
+}
+
 pub fn well_known(id: &str) -> Result<ModelSource> {
-    match id { "sd15" | "stable-diffusion-v1-5" => Ok(ModelSource { id: "sd15".into(), display_name: "Stable Diffusion v1.5".into(), family: "sd15".into(), revision: "main".into(), files: vec![ SourceFile { path: "tokenizer/tokenizer.json".into(), url: "https://hf-mirror.com/openai/clip-vit-base-patch32/resolve/main/tokenizer.json".into(), expected_bytes: Some(2_224_041) }, SourceFile { path: "text_encoder/model.safetensors".into(), url: "https://hf-mirror.com/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/text_encoder/model.safetensors".into(), expected_bytes: Some(643_392_057) }, SourceFile { path: "unet/diffusion_pytorch_model.safetensors".into(), url: "https://hf-mirror.com/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/unet/diffusion_pytorch_model.safetensors".into(), expected_bytes: Some(3_438_167_540) }, SourceFile { path: "vae/diffusion_pytorch_model.safetensors".into(), url: "https://hf-mirror.com/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/vae/diffusion_pytorch_model.safetensors".into(), expected_bytes: Some(334_643_276) }, ] }), other => Err(RegistryError::UnknownModel(other.into())) }
+    match id {
+        "sd15" | "stable-diffusion-v1-5" => Ok(ModelSource { id: "sd15".into(), display_name: "Stable Diffusion v1.5".into(), family: "sd15".into(), revision: "main".into(), files: vec![ source("tokenizer/tokenizer.json", "https://hf-mirror.com/openai/clip-vit-base-patch32/resolve/main/tokenizer.json", Some(2_224_041)), source("text_encoder/model.safetensors", "https://hf-mirror.com/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/text_encoder/model.safetensors", Some(492_265_874)), source("unet/diffusion_pytorch_model.safetensors", "https://hf-mirror.com/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/unet/diffusion_pytorch_model.safetensors", Some(3_438_167_540)), source("vae/diffusion_pytorch_model.safetensors", "https://hf-mirror.com/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/vae/diffusion_pytorch_model.safetensors", Some(334_643_276)) ] }),
+        "sd21" | "stable-diffusion-2-1-base" => Ok(ModelSource { id: "sd21".into(), display_name: "Stable Diffusion 2.1 Base".into(), family: "sd21".into(), revision: "main".into(), files: vec![ source("tokenizer/tokenizer.json", "https://huggingface.co/openai/clip-vit-large-patch14/resolve/main/tokenizer.json", None), source("text_encoder/model.safetensors", "https://huggingface.co/stabilityai/stable-diffusion-2-1-base/resolve/main/text_encoder/model.safetensors", None), source("unet/diffusion_pytorch_model.safetensors", "https://huggingface.co/stabilityai/stable-diffusion-2-1-base/resolve/main/unet/diffusion_pytorch_model.safetensors", None), source("vae/diffusion_pytorch_model.safetensors", "https://huggingface.co/stabilityai/stable-diffusion-2-1-base/resolve/main/vae/diffusion_pytorch_model.safetensors", None) ] }),
+        "sdxl" | "sdxl-base-1.0" => Ok(ModelSource { id: "sdxl".into(), display_name: "Stable Diffusion XL Base 1.0".into(), family: "sdxl".into(), revision: "main".into(), files: vec![ source("tokenizer/tokenizer.json", "https://hf-mirror.com/openai/clip-vit-base-patch32/resolve/main/tokenizer.json", Some(2_224_041)), source("tokenizer_2/tokenizer.json", "https://hf-mirror.com/openai/clip-vit-large-patch14/resolve/main/tokenizer.json", None), source("text_encoder/model.safetensors", "https://hf-mirror.com/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/text_encoder/model.safetensors", Some(492_265_168)), source("text_encoder_2/model.safetensors", "https://hf-mirror.com/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/text_encoder_2/model.safetensors", Some(2_778_702_264)), source("unet/diffusion_pytorch_model.safetensors", "https://hf-mirror.com/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/unet/diffusion_pytorch_model.safetensors", Some(10_270_077_736)), source("vae/diffusion_pytorch_model.safetensors", "https://hf-mirror.com/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/vae/diffusion_pytorch_model.safetensors", Some(334_643_268)) ] }),
+        other => Err(RegistryError::UnknownModel(other.into())),
+    }
 }
 
 fn download_file(client: Client, source: SourceFile, output: &Path, progress: Arc<MultiProgress>) -> Result<DownloadFile> {
@@ -142,7 +151,18 @@ pub fn download(id: &str, output: impl AsRef<Path>) -> Result<DownloadMetadata> 
     fs::create_dir_all(&output)?;
     let bars = Arc::new(MultiProgress::new());
     bars.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-    let client = Client::builder().timeout(Duration::from_secs(600)).build()?;
+    let mut builder = Client::builder().timeout(Duration::from_secs(600));
+    if let Ok(token) = std::env::var("HF_TOKEN") {
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|error| RegistryError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error)))?;
+        value.set_sensitive(true);
+        builder = builder.default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(AUTHORIZATION, value);
+            headers
+        });
+    }
+    let client = builder.build()?;
     let results: Arc<Mutex<Vec<Option<Result<DownloadFile>>>>> =
         Arc::new(Mutex::new((0..model.files.len()).map(|_| None).collect()));
     thread::scope(|scope| {

@@ -16,6 +16,12 @@ Cargo.lock
 *.ckpt
 *.pt
 
+# Runtime model and generated image data
+models/*
+!models/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
 # Node
 *.log
 *.txt

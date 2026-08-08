@@ -6,6 +6,7 @@ edition = "2021"
 diffuser-edit = { path = "../diffuser-edit" }
 diffusion-types = { path = "../diffusion-types" }
 diffusion-models = { path = "../diffusion-models" }
+diffusion-extensions = { path = "../diffusion-extensions" }
 diffusion-registry = { path = "../diffusion-registry" }
 diffusion-server = { path = "../diffusion-server" }
 candle-core.workspace = true

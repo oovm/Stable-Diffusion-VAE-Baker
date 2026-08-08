@@ -5,3 +5,6 @@ edition = "2021"
 [dependencies]
 diffusion-types = { path = "../diffusion-types" }
 image.workspace = true
+candle-core.workspace = true
+safetensors = "0.8"
+sha2 = "0.10"
