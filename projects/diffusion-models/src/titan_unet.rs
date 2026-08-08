@@ -31,9 +31,9 @@ impl Conv {
         })
     }
 
-    fn forward(&self, input: &CudaTensor, stride: [usize; 2]) -> Result<CudaTensor, String> {
+    fn forward(&self, input: &CudaTensor, stride: [usize; 2], padding: [usize; 2]) -> Result<CudaTensor, String> {
         input
-            .conv2d_nchw(&self.weight, Some(&self.bias), Conv2dOptions { stride, padding: [1, 1], ..Default::default() })
+            .conv2d_nchw(&self.weight, Some(&self.bias), Conv2dOptions { stride, padding, ..Default::default() })
             .map_err(|error| format!("convolution: {error:?}"))
     }
 }
@@ -138,7 +138,7 @@ impl TitanResnetBlock {
     /// Executes the block on `[batch, channels, height, width]` tensors.
     pub fn forward(&self, input: &CudaTensor, time_embedding: &CudaTensor) -> Result<CudaTensor, String> {
         let residual = match &self.shortcut {
-            Some(shortcut) => shortcut.forward(input, [1, 1])?,
+            Some(shortcut) => shortcut.forward(input, [1, 1], [0, 0])?,
             None => CudaTensor::from_slice(
                 input.context(),
                 input.shape().to_vec(),
@@ -151,7 +151,7 @@ impl TitanResnetBlock {
             .map_err(|error| format!("group norm 1: {error:?}"))?
             .silu()
             .map_err(|error| format!("silu 1: {error:?}"))?;
-        let hidden = self.conv1.forward(&hidden, [1, 1])?;
+        let hidden = self.conv1.forward(&hidden, [1, 1], [1, 1])?;
         let time = self.time_projection.forward(time_embedding)?;
         let time_values = time.to_vec().map_err(|error| format!("time readback: {error:?}"))?;
         let time = CudaTensor::from_slice(input.context(), vec![time_values.len()], &time_values)
@@ -162,8 +162,34 @@ impl TitanResnetBlock {
             .map_err(|error| format!("group norm 2: {error:?}"))?
             .silu()
             .map_err(|error| format!("silu 2: {error:?}"))?;
-        let hidden = self.conv2.forward(&hidden, [1, 1])?;
+        let hidden = self.conv2.forward(&hidden, [1, 1], [1, 1])?;
         residual.add(&hidden).map_err(|error| format!("resnet residual: {error:?}"))
+    }
+}
+
+/// The initial executable SD 1.5 UNet path up to the first down-block ResNet.
+pub struct TitanUnetStem {
+    conv_in: Conv,
+    time_embedding: TitanTimeEmbedding,
+    first_resnet: TitanResnetBlock,
+}
+
+impl TitanUnetStem {
+    /// Loads `conv_in`, learned timestep layers, and `down_blocks.0.resnets.0`.
+    pub fn from_model(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
+        let path = model_dir.join("unet/diffusion_pytorch_model.safetensors");
+        Ok(Self {
+            conv_in: Conv::load(&path, "conv_in", context)?,
+            time_embedding: TitanTimeEmbedding::from_model(model_dir, context)?,
+            first_resnet: TitanResnetBlock::from_model(model_dir, "down_blocks.0.resnets.0", context, 320, 320)?,
+        })
+    }
+
+    /// Runs `[1,4,H,W]` latent input through the first UNet residual block.
+    pub fn forward(&self, latent: &CudaTensor, timestep: f32) -> Result<CudaTensor, String> {
+        let hidden = self.conv_in.forward(latent, [1, 1], [1, 1])?;
+        let time = self.time_embedding.forward(timestep)?;
+        self.first_resnet.forward(&hidden, &time)
     }
 }
 
@@ -210,10 +236,22 @@ mod tests {
     fn connects_real_sd15_timestep_to_first_resnet_on_gpu() {
         let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
         let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("primary context");
-        let time = TitanTimeEmbedding::from_model(&model_dir, &context).expect("time embedding").forward(999.0).expect("time forward");
+        let time =
+            TitanTimeEmbedding::from_model(&model_dir, &context).expect("time embedding").forward(999.0).expect("time forward");
         let block = TitanResnetBlock::from_model(&model_dir, "down_blocks.0.resnets.0", &context, 320, 320).expect("resnet");
         let input = CudaTensor::from_slice(context, vec![1, 320, 4, 4], &vec![0.0; 320 * 4 * 4]).expect("input");
         let output = block.forward(&input, &time).expect("conditioned ResNet");
+        assert_eq!(output.shape(), &[1, 320, 4, 4]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_unet_stem_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("primary context");
+        let stem = TitanUnetStem::from_model(&model_dir, &context).expect("UNet stem weights");
+        let latent = CudaTensor::from_slice(context, vec![1, 4, 4, 4], &vec![0.0; 4 * 4 * 4]).expect("latent");
+        let output = stem.forward(&latent, 999.0).expect("UNet stem forward");
         assert_eq!(output.shape(), &[1, 320, 4, 4]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
