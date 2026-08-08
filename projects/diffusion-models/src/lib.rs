@@ -13,6 +13,8 @@ pub mod titan_attention;
 pub mod titan_clip;
 /// Native Stable Diffusion UNet building blocks on Titan.
 pub mod titan_unet;
+/// Native SD 1.5 VAE decoder stages on Titan.
+pub mod titan_vae;
 
 /// Opens a CUDA Driver API session through the Titan Git dependency.
 ///
