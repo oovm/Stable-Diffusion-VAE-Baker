@@ -55,6 +55,35 @@ pub struct TitanVaeUpBlock {
     upsample: Option<Conv>,
 }
 
+/// Final VAE decoder normalization and RGB output convolution.
+pub struct TitanVaeOutput {
+    norm_weight: CudaTensor,
+    norm_bias: CudaTensor,
+    conv_out: Conv,
+}
+
+impl TitanVaeOutput {
+    /// Loads `decoder.conv_norm_out.*` and `decoder.conv_out.*`.
+    pub fn from_model(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
+        let path = model_dir.join("vae/diffusion_pytorch_model.safetensors");
+        Ok(Self {
+            norm_weight: load(&path, "decoder.conv_norm_out.weight", context)?,
+            norm_bias: load(&path, "decoder.conv_norm_out.bias", context)?,
+            conv_out: Conv::load(&path, "decoder.conv_out", context)?,
+        })
+    }
+
+    /// Converts the final 128-channel decoder feature map to RGB values.
+    pub fn forward(&self, input: &CudaTensor) -> Result<CudaTensor, String> {
+        let hidden = input
+            .group_norm_nchw(32, &self.norm_weight, &self.norm_bias, 1e-6)
+            .map_err(|e| format!("VAE output norm: {e:?}"))?
+            .silu()
+            .map_err(|e| format!("VAE output SiLU: {e:?}"))?;
+        self.conv_out.forward(&hidden, [1, 1])
+    }
+}
+
 impl TitanVaeUpBlock {
     /// Loads a decoder up block from the real Diffusers VAE.
     pub fn from_model(
@@ -214,6 +243,17 @@ mod tests {
         let input = CudaTensor::from_slice(context, vec![1, 512, 2, 2], &vec![0.0; 512 * 2 * 2]).expect("input");
         let output = block.forward(&input).expect("VAE up block forward");
         assert_eq!(output.shape(), &[1, 256, 4, 4]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_vae_rgb_output_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("CUDA context");
+        let output_head = TitanVaeOutput::from_model(&model_dir, &context).expect("VAE output weights");
+        let input = CudaTensor::from_slice(context, vec![1, 128, 4, 4], &vec![0.0; 128 * 4 * 4]).expect("input");
+        let output = output_head.forward(&input).expect("VAE RGB output");
+        assert_eq!(output.shape(), &[1, 3, 4, 4]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
