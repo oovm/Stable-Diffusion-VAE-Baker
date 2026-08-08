@@ -236,6 +236,28 @@ pub struct TitanCrossAttnDownBlock {
     downsample: Conv,
 }
 
+/// The terminal SD 1.5 down block with two ResNets and no downsampler.
+pub struct TitanTerminalDownBlock {
+    first: TitanResnetBlock,
+    second: TitanResnetBlock,
+}
+
+impl TitanTerminalDownBlock {
+    /// Loads `down_blocks.3.resnets.0/1`.
+    pub fn from_model(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
+        Ok(Self {
+            first: TitanResnetBlock::from_model(model_dir, "down_blocks.3.resnets.0", context, 1280, 1280)?,
+            second: TitanResnetBlock::from_model(model_dir, "down_blocks.3.resnets.1", context, 1280, 1280)?,
+        })
+    }
+
+    /// Executes the terminal down block without changing spatial resolution.
+    pub fn forward(&self, input: &CudaTensor, time: &CudaTensor) -> Result<CudaTensor, String> {
+        let hidden = self.first.forward(input, time)?;
+        self.second.forward(&hidden, time)
+    }
+}
+
 /// SD 1.5's bottleneck: ResNet, spatial transformer, then ResNet.
 pub struct TitanMidBlock {
     first_resnet: TitanResnetBlock,
@@ -590,6 +612,19 @@ mod tests {
         let input = CudaTensor::from_slice(context.clone(), vec![1, 1280, 2, 2], &vec![0.0; 1280 * 2 * 2]).expect("input");
         let conditioning = CudaTensor::from_slice(context, vec![77, 768], &vec![0.0; 77 * 768]).expect("conditioning");
         let output = block.forward(&input, &time, &conditioning).expect("mid block forward");
+        assert_eq!(output.shape(), &[1, 1280, 2, 2]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_terminal_down_block_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("CUDA context");
+        let time =
+            TitanTimeEmbedding::from_model(&model_dir, &context).expect("time embedding").forward(999.0).expect("time forward");
+        let block = TitanTerminalDownBlock::from_model(&model_dir, &context).expect("terminal down weights");
+        let input = CudaTensor::from_slice(context, vec![1, 1280, 2, 2], &vec![0.0; 1280 * 2 * 2]).expect("input");
+        let output = block.forward(&input, &time).expect("terminal down forward");
         assert_eq!(output.shape(), &[1, 1280, 2, 2]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
