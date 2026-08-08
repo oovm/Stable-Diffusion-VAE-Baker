@@ -75,6 +75,71 @@ pub struct TitanBasicTransformerBlock {
     ff_out: Linear,
 }
 
+struct Conv1x1 {
+    weight: CudaTensor,
+    bias: CudaTensor,
+}
+
+impl Conv1x1 {
+    fn load(path: &Path, prefix: &str, context: &CudaContext) -> Result<Self, String> {
+        Ok(Self { weight: load(path, &format!("{prefix}.weight"), context)?, bias: load(path, &format!("{prefix}.bias"), context)? })
+    }
+
+    fn forward(&self, input: &CudaTensor) -> Result<CudaTensor, String> {
+        input
+            .conv2d_nchw(&self.weight, Some(&self.bias), titan_tensor::Conv2dOptions::default())
+            .map_err(|e| format!("transformer 1x1 convolution: {e:?}"))
+    }
+}
+
+/// Diffusers `Transformer2DModel` using one BasicTransformerBlock.
+pub struct TitanSpatialTransformer {
+    norm_weight: CudaTensor,
+    norm_bias: CudaTensor,
+    proj_in: Conv1x1,
+    block: TitanBasicTransformerBlock,
+    proj_out: Conv1x1,
+    channels: usize,
+}
+
+impl TitanSpatialTransformer {
+    /// Loads a spatial attention module such as `mid_block.attentions.0`.
+    pub fn from_model(model_dir: &Path, prefix: &str, channels: usize, context: &CudaContext) -> Result<Self, String> {
+        let path = model_dir.join("unet/diffusion_pytorch_model.safetensors");
+        Ok(Self {
+            norm_weight: load(&path, &format!("{prefix}.norm.weight"), context)?,
+            norm_bias: load(&path, &format!("{prefix}.norm.bias"), context)?,
+            proj_in: Conv1x1::load(&path, &format!("{prefix}.proj_in"), context)?,
+            block: TitanBasicTransformerBlock::from_model(model_dir, &format!("{prefix}.transformer_blocks.0"), context)?,
+            proj_out: Conv1x1::load(&path, &format!("{prefix}.proj_out"), context)?,
+            channels,
+        })
+    }
+
+    /// Runs one NCHW spatial transformer against CLIP conditioning tokens.
+    pub fn forward(&self, input: &CudaTensor, conditioning: &CudaTensor) -> Result<CudaTensor, String> {
+        let [batch, channels, height, width] = input.shape() else {
+            return Err(format!("spatial transformer expects rank-4 input, got {:?}", input.shape()));
+        };
+        if *batch != 1 || *channels != self.channels {
+            return Err(format!("spatial transformer expects [1, {}, H, W], got {:?}", self.channels, input.shape()));
+        }
+        let residual = CudaTensor::from_slice(
+            input.context(),
+            input.shape().to_vec(),
+            &input.to_vec().map_err(|e| format!("residual copy: {e:?}"))?,
+        )
+        .map_err(|e| format!("residual upload: {e:?}"))?;
+        let hidden = input
+            .group_norm_nchw(32, &self.norm_weight, &self.norm_bias, 1e-6)
+            .map_err(|e| format!("spatial norm: {e:?}"))?;
+        let hidden = self.proj_in.forward(&hidden)?;
+        let tokens = self.block.forward(&hidden.nchw_to_tokens().map_err(|e| format!("token layout: {e:?}"))?, conditioning)?;
+        let hidden = tokens.tokens_to_nchw(*channels, *height, *width).map_err(|e| format!("NCHW layout: {e:?}"))?;
+        residual.add(&self.proj_out.forward(&hidden)?).map_err(|e| format!("spatial residual: {e:?}"))
+    }
+}
+
 impl TitanBasicTransformerBlock {
     /// Loads a block below a Diffusers transformer prefix.
     pub fn from_model(model_dir: &Path, prefix: &str, context: &CudaContext) -> Result<Self, String> {
@@ -171,6 +236,19 @@ mod tests {
         let conditioning = CudaTensor::from_slice(context, vec![77, 768], &vec![0.0; 77 * 768]).expect("CLIP conditioning");
         let output = block.forward(&latent, &conditioning).expect("Titan cross attention");
         assert_eq!(output.shape(), &[16, 1280]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_spatial_transformer_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("primary context");
+        let transformer = TitanSpatialTransformer::from_model(&model_dir, "mid_block.attentions.0", 1280, &context)
+            .expect("spatial transformer weights");
+        let input = CudaTensor::from_slice(context.clone(), vec![1, 1280, 4, 4], &vec![0.0; 1280 * 4 * 4]).expect("latent");
+        let conditioning = CudaTensor::from_slice(context, vec![77, 768], &vec![0.0; 77 * 768]).expect("conditioning");
+        let output = transformer.forward(&input, &conditioning).expect("spatial transformer forward");
+        assert_eq!(output.shape(), &[1, 1280, 4, 4]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
