@@ -236,6 +236,31 @@ pub struct TitanCrossAttnDownBlock {
     downsample: Conv,
 }
 
+/// SD 1.5's bottleneck: ResNet, spatial transformer, then ResNet.
+pub struct TitanMidBlock {
+    first_resnet: TitanResnetBlock,
+    attention: TitanSpatialTransformer,
+    second_resnet: TitanResnetBlock,
+}
+
+impl TitanMidBlock {
+    /// Loads `mid_block.resnets.0`, `mid_block.attentions.0`, and `mid_block.resnets.1`.
+    pub fn from_model(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
+        Ok(Self {
+            first_resnet: TitanResnetBlock::from_model(model_dir, "mid_block.resnets.0", context, 1280, 1280)?,
+            attention: TitanSpatialTransformer::from_model(model_dir, "mid_block.attentions.0", 1280, context)?,
+            second_resnet: TitanResnetBlock::from_model(model_dir, "mid_block.resnets.1", context, 1280, 1280)?,
+        })
+    }
+
+    /// Executes the complete conditioned UNet bottleneck.
+    pub fn forward(&self, input: &CudaTensor, time: &CudaTensor, conditioning: &CudaTensor) -> Result<CudaTensor, String> {
+        let hidden = self.first_resnet.forward(input, time)?;
+        let hidden = self.attention.forward(&hidden, conditioning)?;
+        self.second_resnet.forward(&hidden, time)
+    }
+}
+
 impl TitanCrossAttnDownBlock {
     /// Loads the two ResNet/Transformer pairs and the stride-2 downsampler.
     pub fn from_model(
@@ -394,6 +419,20 @@ mod tests {
         let conditioning = CudaTensor::from_slice(context, vec![77, 768], &vec![0.0; 77 * 768]).expect("conditioning");
         let output = block.forward(&input, &time, &conditioning).expect("cross down block forward");
         assert_eq!(output.shape(), &[1, 640, 2, 2]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_mid_block_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("primary context");
+        let time =
+            TitanTimeEmbedding::from_model(&model_dir, &context).expect("time embedding").forward(999.0).expect("time forward");
+        let block = TitanMidBlock::from_model(&model_dir, &context).expect("mid block weights");
+        let input = CudaTensor::from_slice(context.clone(), vec![1, 1280, 2, 2], &vec![0.0; 1280 * 2 * 2]).expect("input");
+        let conditioning = CudaTensor::from_slice(context, vec![77, 768], &vec![0.0; 77 * 768]).expect("conditioning");
+        let output = block.forward(&input, &time, &conditioning).expect("mid block forward");
+        assert_eq!(output.shape(), &[1, 1280, 2, 2]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
