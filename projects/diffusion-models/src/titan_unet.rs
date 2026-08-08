@@ -145,4 +145,17 @@ mod tests {
         assert_eq!(block.conv1.weight.shape(), &[320, 320, 3, 3]);
         assert_eq!(block.time_projection.weight.shape(), &[1280, 320]);
     }
+
+    #[test]
+    fn executes_real_sd15_first_resnet_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("primary context");
+        let block = TitanResnetBlock::from_model(&model_dir, "down_blocks.0.resnets.0", &context, 320, 320)
+            .expect("first SD15 ResNet weights");
+        let input = CudaTensor::from_slice(context.clone(), vec![1, 320, 8, 8], &vec![0.0; 320 * 8 * 8]).expect("latent input");
+        let time = CudaTensor::from_slice(context, vec![1, 1280], &vec![0.0; 1280]).expect("time embedding");
+        let output = block.forward(&input, &time).expect("Titan ResNet forward");
+        assert_eq!(output.shape(), &[1, 320, 8, 8]);
+        assert!(output.to_vec().expect("output download").iter().all(|value| value.is_finite()));
+    }
 }
