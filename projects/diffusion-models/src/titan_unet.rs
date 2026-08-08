@@ -174,6 +174,59 @@ pub struct TitanUnetStem {
     first_resnet: TitanResnetBlock,
 }
 
+/// A Diffusers UNet down block with two time-conditioned ResNets and a stride-2 convolution.
+pub struct TitanDownBlock {
+    resnets: Vec<TitanResnetBlock>,
+    downsample: Conv,
+}
+
+impl TitanDownBlock {
+    /// Loads a two-ResNet down block, including `downsamplers.0.conv`.
+    pub fn from_model(
+        model_dir: &Path,
+        block_index: usize,
+        input_channels: usize,
+        output_channels: usize,
+        context: &CudaContext,
+    ) -> Result<Self, String> {
+        let path = model_dir.join("unet/diffusion_pytorch_model.safetensors");
+        let prefix = format!("down_blocks.{block_index}");
+        Ok(Self {
+            resnets: vec![
+                TitanResnetBlock::from_model(
+                    model_dir,
+                    &format!("{prefix}.resnets.0"),
+                    context,
+                    input_channels,
+                    output_channels,
+                )?,
+                TitanResnetBlock::from_model(
+                    model_dir,
+                    &format!("{prefix}.resnets.1"),
+                    context,
+                    output_channels,
+                    output_channels,
+                )?,
+            ],
+            downsample: Conv::load(&path, &format!("{prefix}.downsamplers.0.conv"), context)?,
+        })
+    }
+
+    /// Runs both residual blocks and halves the spatial dimensions.
+    pub fn forward(&self, input: &CudaTensor, time: &CudaTensor) -> Result<CudaTensor, String> {
+        let mut hidden = CudaTensor::from_slice(
+            input.context(),
+            input.shape().to_vec(),
+            &input.to_vec().map_err(|e| format!("down block input: {e:?}"))?,
+        )
+        .map_err(|e| format!("down block upload: {e:?}"))?;
+        for block in &self.resnets {
+            hidden = block.forward(&hidden, time)?;
+        }
+        self.downsample.forward(&hidden, [2, 2], [1, 1])
+    }
+}
+
 impl TitanUnetStem {
     /// Loads `conv_in`, learned timestep layers, and `down_blocks.0.resnets.0`.
     pub fn from_model(model_dir: &Path, context: &CudaContext) -> Result<Self, String> {
@@ -253,6 +306,19 @@ mod tests {
         let latent = CudaTensor::from_slice(context, vec![1, 4, 4, 4], &vec![0.0; 4 * 4 * 4]).expect("latent");
         let output = stem.forward(&latent, 999.0).expect("UNet stem forward");
         assert_eq!(output.shape(), &[1, 320, 4, 4]);
+        assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn executes_real_sd15_first_down_block_on_gpu() {
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("primary context");
+        let time =
+            TitanTimeEmbedding::from_model(&model_dir, &context).expect("time embedding").forward(999.0).expect("time forward");
+        let block = TitanDownBlock::from_model(&model_dir, 0, 320, 320, &context).expect("down block weights");
+        let input = CudaTensor::from_slice(context, vec![1, 320, 4, 4], &vec![0.0; 320 * 4 * 4]).expect("input");
+        let output = block.forward(&input, &time).expect("down block forward");
+        assert_eq!(output.shape(), &[1, 320, 2, 2]);
         assert!(output.to_vec().expect("download").iter().all(|value| value.is_finite()));
     }
 }
