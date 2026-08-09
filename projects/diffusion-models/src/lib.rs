@@ -1,5 +1,5 @@
 //! Safe model inspection and format detection.
-use diffusion_types::{DevicePreference, DiffusionError, ModelFamily, Result};
+use diffusion_types::{DiffusionError, ModelFamily, Result};
 use safetensors::{SafeTensors, tensor::Dtype};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -8,49 +8,6 @@ use std::{
     sync::{Arc, OnceLock, RwLock},
 };
 
-/// Native Diffusers spatial transformer blocks on Titan.
-pub mod titan_attention;
-/// Titan Driver API implementation of the SD 1.5 CLIP embedding stage.
-pub mod titan_clip;
-/// Native Stable Diffusion UNet building blocks on Titan.
-pub mod titan_unet;
-/// Native SD 1.5 VAE decoder stages on Titan.
-pub mod titan_vae;
-/// Device-resident SD 1.5 DDIM scheduler.
-pub mod titan_scheduler;
-
-/// Opens a CUDA Driver API session through the Titan Git dependency.
-///
-/// This is deliberately a driver-only capability probe. Model execution is
-/// added only after Titan publishes device buffers and kernel dispatch.
-pub fn open_titan_cuda(ordinal: usize) -> std::result::Result<titan_hal::CudaDriver, titan_hal::CudaDriverError> {
-    titan_hal::CudaDriver::open(ordinal)
-}
-
-/// The actual execution target selected for the native Titan path.
-#[derive(Debug)]
-pub enum TitanDevice {
-    /// Host execution is selected explicitly or after an automatic fallback.
-    Cpu,
-    /// NVIDIA Driver API execution has an active primary CUDA context.
-    Cuda(titan_hal::CudaContext),
-}
-
-/// Selects the native Titan execution target for one `sd.exe` invocation.
-///
-/// `auto` attempts the NVIDIA Driver API and falls back to CPU. `cuda`
-/// propagates the Driver API error, so a requested GPU can never silently run
-/// the model on the CPU.
-pub fn select_titan_device(preference: DevicePreference) -> std::result::Result<TitanDevice, titan_hal::CudaDriverError> {
-    match preference {
-        DevicePreference::Cpu => Ok(TitanDevice::Cpu),
-        DevicePreference::Cuda => Ok(TitanDevice::Cuda(open_titan_cuda(0)?.primary_context()?)),
-        DevicePreference::Auto => match open_titan_cuda(0).and_then(|driver| driver.primary_context()) {
-            Ok(context) => Ok(TitanDevice::Cuda(context)),
-            Err(_) => Ok(TitanDevice::Cpu),
-        },
-    }
-}
 
 /// Minimal DDIM scheduler state for an SD 1.5 denoising run.
 #[derive(Clone, Debug)]
@@ -222,43 +179,6 @@ pub fn load_sd15_token_embedding(model_dir: &Path) -> Result<F32Weight> {
     load_f32_weight(&model_dir.join("text_encoder/model.safetensors"), "text_model.embeddings.token_embedding.weight")
 }
 
-/// Uploads a decoded weight into a Titan Driver API tensor.
-pub fn upload_weight(weight: &F32Weight, context: titan_hal::CudaContext) -> Result<titan_tensor::CudaTensor> {
-    titan_tensor::CudaTensor::from_slice(context, weight.shape.clone(), &weight.values)
-        .map_err(|error| DiffusionError::Model(format!("upload {}: {error:?}", weight.name)))
-}
-
-#[cfg(all(test, windows))]
-mod titan_integration_tests {
-    #[test]
-    fn opens_the_nvidia_driver_from_the_remote_titan_dependency() {
-        let driver = super::open_titan_cuda(0).expect("NVIDIA driver device 0");
-        assert!(driver.device_count() >= 1);
-    }
-
-    #[test]
-    fn dispatches_a_tensor_addition_from_the_remote_titan_dependency() {
-        let context = super::open_titan_cuda(0).expect("NVIDIA driver device 0").primary_context().expect("CUDA context");
-        let left = titan_tensor::CudaTensor::from_slice(context.clone(), vec![2], &[1.0, 2.0]).expect("left upload");
-        let right = titan_tensor::CudaTensor::from_slice(context, vec![2], &[0.5, 1.5]).expect("right upload");
-        assert_eq!(left.add(&right).expect("CUDA add").to_vec().expect("result download"), vec![1.5, 3.5]);
-    }
-
-    #[test]
-    fn dispatches_a_matrix_multiplication_from_the_remote_titan_dependency() {
-        let context = super::open_titan_cuda(0).expect("NVIDIA driver device 0").primary_context().expect("CUDA context");
-        let left = titan_tensor::CudaTensor::from_slice(context.clone(), vec![1, 2], &[2.0, 3.0]).expect("left upload");
-        let right = titan_tensor::CudaTensor::from_slice(context, vec![2, 1], &[4.0, 5.0]).expect("right upload");
-        assert_eq!(left.matmul(&right).expect("CUDA matmul").to_vec().expect("result download"), vec![23.0]);
-    }
-
-    #[test]
-    fn auto_and_cuda_select_an_active_titan_cuda_context() {
-        assert!(matches!(super::select_titan_device(diffusion_types::DevicePreference::Auto), Ok(super::TitanDevice::Cuda(_))));
-        assert!(matches!(super::select_titan_device(diffusion_types::DevicePreference::Cuda), Ok(super::TitanDevice::Cuda(_))));
-        assert!(matches!(super::select_titan_device(diffusion_types::DevicePreference::Cpu), Ok(super::TitanDevice::Cpu)));
-    }
-}
 
 #[cfg(test)]
 mod scheduler_tests {
@@ -298,16 +218,4 @@ mod weight_tests {
         assert_eq!(weight.values.len(), 49_408 * 768);
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn uploads_and_reads_back_the_real_sd15_clip_embedding_prefix() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
-        let weight = load_sd15_token_embedding(&path).expect("real SD15 CLIP embedding");
-        let context = open_titan_cuda(0).expect("NVIDIA driver").primary_context().expect("CUDA context");
-        let tensor = upload_weight(&weight, context).expect("upload embedding");
-        let prefix = tensor.gather_rows(&[0, 1]).expect("embedding prefix").to_vec().expect("download prefix");
-        assert_eq!(prefix.len(), 2 * 768);
-        assert_eq!(prefix[0], weight.values[0]);
-        assert_eq!(prefix[768], weight.values[768]);
-    }
 }

@@ -19,14 +19,6 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Generate(GenerateArgs),
-    /// Tokenize a prompt and run the native Titan SD 1.5 CLIP text encoder.
-    TitanEncode {
-        /// Diffusers SD 1.5 directory containing tokenizer and text_encoder.
-        #[arg(long)]
-        model_dir: PathBuf,
-        #[arg(long)]
-        prompt: String,
-    },
     /// Download a well-known model with HTTP range resume support.
     Download {
         /// Registry model id, for example `sd15`.
@@ -75,15 +67,6 @@ enum DeviceKind {
     Cuda,
 }
 
-impl DeviceKind {
-    fn preference(self) -> diffusion_types::DevicePreference {
-        match self {
-            Self::Auto => diffusion_types::DevicePreference::Auto,
-            Self::Cpu => diffusion_types::DevicePreference::Cpu,
-            Self::Cuda => diffusion_types::DevicePreference::Cuda,
-        }
-    }
-}
 #[derive(Clone, Parser)]
 struct GenerateArgs {
     #[arg(long)]
@@ -201,21 +184,11 @@ fn save(vae: &AutoEncoderKL, latents: &Tensor, scale: f64, output: &Path) -> Res
     Ok(())
 }
 
-/// Resolves the public device flag through Titan's driver-only probe before
-/// handing the selected target to the legacy Candle pipeline.
 fn resolve_device(kind: DeviceKind) -> Result<Device> {
-    match diffusion_models::select_titan_device(kind.preference()) {
-        Ok(diffusion_models::TitanDevice::Cpu) => Ok(Device::Cpu),
-        Ok(diffusion_models::TitanDevice::Cuda(_context)) => Device::new_cuda(0).with_context(|| {
-            "Titan found an NVIDIA driver, but this legacy Candle pipeline has no CUDA backend; use the native Titan pipeline"
-        }),
-        Err(error) if matches!(kind, DeviceKind::Auto) => {
-            eprintln!("NVIDIA driver unavailable ({error:?}); falling back to CPU");
-            Ok(Device::Cpu)
-        }
-        Err(error) => Err(anyhow::anyhow!(
-            "failed to initialize Titan CUDA device 0 for --device cuda: {error:?}"
-        )),
+    match kind {
+        DeviceKind::Cpu => Ok(Device::Cpu),
+        DeviceKind::Cuda => Device::new_cuda(0).context("CUDA requested but unavailable"),
+        DeviceKind::Auto => Device::new_cuda(0).or_else(|_| Ok(Device::Cpu)),
     }
 }
 
@@ -289,21 +262,6 @@ fn generate(args: GenerateArgs) -> Result<u64> {
     Ok(seed)
 }
 
-fn titan_encode(model_dir: &Path, prompt: &str) -> Result<()> {
-    let tokenizer_path = path(model_dir, "tokenizer/tokenizer.json")?;
-    let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(anyhow::Error::msg)?;
-    let token_ids = diffusion_tools::tokenize_titan_sd15_prompt(&tokenizer, prompt).map_err(anyhow::Error::msg)?;
-    let context = match diffusion_models::select_titan_device(diffusion_types::DevicePreference::Cuda) {
-        Ok(diffusion_models::TitanDevice::Cuda(context)) => context,
-        Ok(diffusion_models::TitanDevice::Cpu) => bail!("native Titan CLIP requires an NVIDIA CUDA device"),
-        Err(error) => bail!("failed to initialize native Titan CUDA device 0: {error:?}"),
-    };
-    let encoder =
-        diffusion_models::titan_clip::TitanClipEncoder::from_model_dir(model_dir, context).map_err(anyhow::Error::msg)?;
-    let conditioning = encoder.encode(&token_ids).map_err(anyhow::Error::msg)?;
-    println!("Titan SD 1.5 CLIP conditioning shape: {:?}", conditioning.shape());
-    Ok(())
-}
 #[derive(Clone)]
 struct LocalPipeline {
     model_dir: PathBuf,
@@ -356,7 +314,6 @@ fn main() -> Result<()> {
             generate(args)?;
             Ok(())
         }
-        Command::TitanEncode { model_dir, prompt } => titan_encode(&model_dir, &prompt),
         Command::Download { model, output_dir } => {
             let output_dir = output_dir.unwrap_or(executable_dir()?.join("models"));
             let destination = diffusion_registry::model_dir(&output_dir, &model)?;
