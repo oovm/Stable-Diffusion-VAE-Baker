@@ -6,7 +6,10 @@ edition = "2021"
 diffusion-types = { path = "../diffusion-types" }
 titan-hal = { git = "https://github.com/game-gpt/titan.rs.git", rev = "8009af4", package = "titan-hal" }
 titan-backend-cpu = { git = "https://github.com/game-gpt/titan.rs.git", rev = "8009af4", package = "titan-backend-cpu" }
+titan-graph = { git = "https://github.com/game-gpt/titan.rs.git", rev = "8009af4", package = "titan-graph" }
+titan-runtime = { git = "https://github.com/game-gpt/titan.rs.git", rev = "8009af4", package = "titan-runtime" }
 titan-tensor = { git = "https://github.com/game-gpt/titan.rs.git", rev = "8009af4", package = "titan-tensor" }
+titan-types = { git = "https://github.com/game-gpt/titan.rs.git", rev = "8009af4", package = "titan-types" }
 safetensors = "0.8.0"
 half = "2.7"
 tokenizers = "0.22"

@@ -8,8 +8,11 @@ use std::{
     sync::{Arc, OnceLock, RwLock},
 };
 use titan_backend_cpu::CpuDriver;
+use titan_graph::{EffectContract, OpRequest, TensorSpec};
 use titan_hal::BackendDriver;
+use titan_runtime::Runtime;
 use titan_tensor::{Device as TitanDevice, F32Tensor};
+use titan_types::{AliasContract, AttrMap, AttrValue, DType, Layout, MemoryEffect, OperatorId, Shape, SourceSpan, Strides};
 use tokenizers::Tokenizer;
 
 
@@ -172,6 +175,50 @@ impl TitanCpuBridge {
         self.upload_f32(&values)
     }
 
+    /// Uploads a host vector for a backend-neutral Titan operation.
+    pub fn upload_values(&self, values: &[f32]) -> Result<TitanCpuTensor1> {
+        self.upload_f32(values)
+    }
+
+    /// Adds two same-shaped tensors through Titan Runtime's generated CPU contract.
+    pub fn add_readback(&self, left: &TitanCpuTensor1, right: &TitanCpuTensor1) -> Result<Vec<f32>> {
+        let left_handle = left.tensor.handle();
+        let right_handle = right.tensor.handle();
+        if left_handle.shape() != right_handle.shape() {
+            return Err(DiffusionError::InvalidRequest("Titan CPU add shape mismatch".into()));
+        }
+        let shape = left_handle.shape().iter().map(|dimension| *dimension as u64).collect::<Vec<_>>();
+        let mut attrs = AttrMap::new();
+        attrs.insert("operation".into(), AttrValue::String("add".into()));
+        let request = OpRequest {
+            operator: OperatorId("elementwise.fused".into()),
+            inputs: vec![left_handle, right_handle],
+            outputs: vec![TensorSpec {
+                dtype: DType::F32,
+                shape: Shape(shape),
+                strides: Strides(vec![1]),
+                layout: Layout::Contiguous,
+                alias: AliasContract::NoAlias,
+            }],
+            attrs,
+            effects: EffectContract { memory: MemoryEffect::Pure, deterministic: true },
+            source: SourceSpan { file: "diffusion-models::TitanCpuBridge::add_readback".into(), line: 1, column: 1 },
+        };
+        let mut runtime = Runtime::open(std::env::temp_dir().join("stable-native-sd15-titan-cpu"));
+        let output = runtime
+            .execute(request)
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU add dispatch failed: {error}")))?
+            .wait()
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU add wait failed: {error}")))?
+            .outputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| DiffusionError::Model("Titan CPU add returned no output".into()))?;
+        output
+            .to_vec_f32()
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU add output read failed: {error}")))
+    }
+
     fn upload_f32(&self, values: &[f32]) -> Result<TitanCpuTensor1> {
         let tensor = F32Tensor::from_slice(&self.device, [values.len()], values)
             .map_err(|error| DiffusionError::Model(format!("Titan CPU upload failed: {error}")))?;
@@ -278,6 +325,44 @@ pub fn load_sd15_token_embedding(model_dir: &Path) -> Result<F32Weight> {
     load_diffusers_weight(model_dir, "text_encoder", "text_model.embeddings.token_embedding.weight")
 }
 
+/// Loads SD 1.5 CLIP's learned 77-position embedding table.
+pub fn load_sd15_position_embedding(model_dir: &Path) -> Result<F32Weight> {
+    load_diffusers_weight(model_dir, "text_encoder", "text_model.embeddings.position_embedding.weight")
+}
+
+/// Performs the embedding-table lookup portion of the CLIP input path.
+pub fn lookup_sd15_token_embeddings(tokens: &Sd15PromptTokens, table: &F32Weight) -> Result<Vec<f32>> {
+    if table.shape != [49_408, 768] {
+        return Err(DiffusionError::Model(format!("{}: expected SD15 token table [49408, 768]", table.name)));
+    }
+    if tokens.ids.len() != 77 {
+        return Err(DiffusionError::InvalidRequest("SD15 token input must contain 77 IDs".into()));
+    }
+    let mut output = Vec::with_capacity(tokens.ids.len() * table.shape[1]);
+    for &token in &tokens.ids {
+        let start = token
+            .checked_mul(table.shape[1])
+            .ok_or_else(|| DiffusionError::InvalidRequest("token embedding offset overflow".into()))?;
+        let row = table
+            .values
+            .get(start..start + table.shape[1])
+            .ok_or_else(|| DiffusionError::InvalidRequest(format!("token ID {token} is outside the SD15 vocabulary")))?;
+        output.extend_from_slice(row);
+    }
+    Ok(output)
+}
+
+/// Returns the learned position rows in row-major layout for the 77-token input.
+pub fn sd15_position_values(tokens: &Sd15PromptTokens, table: &F32Weight) -> Result<Vec<f32>> {
+    if table.shape != [77, 768] {
+        return Err(DiffusionError::Model(format!("{}: expected SD15 position table [77, 768]", table.name)));
+    }
+    if tokens.ids.len() != 77 {
+        return Err(DiffusionError::InvalidRequest("SD15 token input must contain 77 IDs".into()));
+    }
+    Ok(table.values.clone())
+}
+
 
 #[cfg(test)]
 mod scheduler_tests {
@@ -356,6 +441,32 @@ mod tokenizer_tests {
         assert_eq!(round_trip.len(), tokens.ids.len());
         for (actual, expected) in round_trip.iter().zip(&tokens.ids) {
             assert_eq!(*actual, *expected as f32);
+        }
+    }
+
+    #[test]
+    fn executes_sd15_embedding_lookup_plus_position_add_on_titan_cpu() {
+        let model_dir = std::env::var_os("SD15_MODEL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"D:\AI 生图\stable-diffusion.rs\models\sd15"));
+        let tokenizer_path = std::env::var_os("SD15_TOKENIZER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| model_dir.join("tokenizer/tokenizer.json"));
+        let tokenizer = Tokenizer::from_file(&tokenizer_path).expect("real SD15 tokenizer");
+        let tokens = tokenize_sd15_prompt(&tokenizer, "a photo of a cat").expect("prompt tokens");
+        let token_table = load_sd15_token_embedding(&model_dir).expect("real token embedding");
+        let position_table = load_sd15_position_embedding(&model_dir).expect("real position embedding");
+        let token_rows = lookup_sd15_token_embeddings(&tokens, &token_table).expect("embedding lookup");
+        let position_rows = sd15_position_values(&tokens, &position_table).expect("position rows");
+        let expected: Vec<f32> = token_rows.iter().zip(&position_rows).map(|(token, position)| token + position).collect();
+
+        let bridge = TitanCpuBridge::open().expect("Titan CPU");
+        let token_tensor = bridge.upload_values(&token_rows).expect("upload token rows");
+        let position_tensor = bridge.upload_values(&position_rows).expect("upload position rows");
+        let actual = bridge.add_readback(&token_tensor, &position_tensor).expect("Titan CPU position add");
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() <= 1e-7, "Titan add mismatch: {actual} vs {expected}");
         }
     }
 }
