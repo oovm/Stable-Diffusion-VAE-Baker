@@ -7,6 +7,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, OnceLock, RwLock},
 };
+use titan_backend_cpu::CpuDriver;
+use titan_hal::BackendDriver;
+use titan_tensor::{Device as TitanDevice, F32Tensor};
 use tokenizers::Tokenizer;
 
 
@@ -126,6 +129,63 @@ pub struct F32Weight {
 pub struct Sd15PromptTokens {
     /// Exactly 77 IDs, including tokenizer-owned special tokens and EOT padding.
     pub ids: Vec<usize>,
+}
+
+/// Opaque CPU bridge backed by Titan's backend-neutral tensor contract.
+pub struct TitanCpuBridge {
+    device: TitanDevice,
+}
+
+/// A one-dimensional F32 tensor owned by Titan's runtime device.
+pub struct TitanCpuTensor1 {
+    tensor: F32Tensor<1>,
+}
+
+impl TitanCpuBridge {
+    /// Opens Titan's portable CPU device (ordinal zero).
+    pub fn open() -> Result<Self> {
+        let driver = CpuDriver;
+        let fingerprint = driver
+            .enumerate()
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU enumerate failed: {error}")))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| DiffusionError::Model("Titan CPU has no devices".into()))?;
+        let session = driver
+            .open(fingerprint.device)
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU open failed: {error}")))?;
+        Ok(Self { device: TitanDevice::from_session(session) })
+    }
+
+    /// Uploads a contiguous weight slice without retaining the source file buffer.
+    pub fn upload_weight_slice(&self, weight: &F32Weight, range: std::ops::Range<usize>) -> Result<TitanCpuTensor1> {
+        let values = weight
+            .values
+            .get(range)
+            .ok_or_else(|| DiffusionError::InvalidRequest(format!("{}: weight slice is out of bounds", weight.name)))?;
+        self.upload_f32(values)
+    }
+
+    /// Uploads fixed-length tokenizer IDs using lossless F32 representation.
+    pub fn upload_prompt_tokens(&self, tokens: &Sd15PromptTokens) -> Result<TitanCpuTensor1> {
+        let values: Vec<f32> = tokens.ids.iter().map(|id| *id as f32).collect();
+        self.upload_f32(&values)
+    }
+
+    fn upload_f32(&self, values: &[f32]) -> Result<TitanCpuTensor1> {
+        let tensor = F32Tensor::from_slice(&self.device, [values.len()], values)
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU upload failed: {error}")))?;
+        Ok(TitanCpuTensor1 { tensor })
+    }
+}
+
+impl TitanCpuTensor1 {
+    /// Synchronizes the Titan tensor and downloads its F32 values.
+    pub fn read_f32(&self) -> Result<Vec<f32>> {
+        self.tensor
+            .to_vec()
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU readback failed: {error}")))
+    }
 }
 
 /// Encodes one prompt with the repository's SD 1.5 CLIP tokenizer.
@@ -262,6 +322,18 @@ mod weight_tests {
         assert_eq!(weight.values[0].to_bits(), 0xba9d_ebb0);
     }
 
+    #[test]
+    fn uploads_and_reads_back_a_real_weight_slice_on_titan_cpu() {
+        let path = std::env::var_os("SD15_MODEL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"D:\AI 生图\stable-diffusion.rs\models\sd15"));
+        let weight = load_sd15_token_embedding(&path).expect("real SD15 CLIP embedding");
+        let expected = weight.values[..8].to_vec();
+        let bridge = TitanCpuBridge::open().expect("Titan CPU");
+        let tensor = bridge.upload_weight_slice(&weight, 0..expected.len()).expect("upload weight slice");
+        assert_eq!(tensor.read_f32().expect("read weight slice"), expected);
+    }
+
 }
 
 #[cfg(test)]
@@ -278,5 +350,12 @@ mod tokenizer_tests {
         assert_eq!(tokens.ids.len(), 77);
         assert_eq!(&tokens.ids[..8], &[49406, 320, 1125, 539, 320, 2368, 49407, 49407]);
         assert!(tokens.ids[7..].iter().all(|id| *id == 49407));
+        let bridge = TitanCpuBridge::open().expect("Titan CPU");
+        let tensor = bridge.upload_prompt_tokens(&tokens).expect("upload prompt IDs");
+        let round_trip = tensor.read_f32().expect("read prompt IDs");
+        assert_eq!(round_trip.len(), tokens.ids.len());
+        for (actual, expected) in round_trip.iter().zip(&tokens.ids) {
+            assert_eq!(*actual, *expected as f32);
+        }
     }
 }
