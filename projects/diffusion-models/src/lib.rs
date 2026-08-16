@@ -114,8 +114,18 @@ pub struct F32Weight {
     pub name: String,
     /// Row-major tensor dimensions.
     pub shape: Vec<usize>,
+    /// Source safetensors dtype before conversion.
+    pub source_dtype: Dtype,
     /// Converted f32 values.
     pub values: Vec<f32>,
+}
+
+/// Loads one tensor from a Diffusers component directory.
+pub fn load_diffusers_weight(model_dir: &Path, component: &str, name: &str) -> Result<F32Weight> {
+    if component.contains('/') || component.contains('\\') || component == "." || component == ".." {
+        return Err(DiffusionError::InvalidRequest(format!("invalid Diffusers component: {component}")));
+    }
+    load_f32_weight(&model_dir.join(component).join("model.safetensors"), name)
 }
 
 // Reuse the immutable safetensors file buffer while assembling a native
@@ -146,7 +156,8 @@ pub fn load_f32_weight(path: &Path, name: &str) -> Result<F32Weight> {
         .try_fold(1usize, |count, dimension| count.checked_mul(*dimension))
         .ok_or_else(|| DiffusionError::Model(format!("{name}: shape element count overflow")))?;
     let data = tensor.data();
-    let values = match tensor.dtype() {
+    let source_dtype = tensor.dtype();
+    let values = match source_dtype {
         Dtype::F32 => {
             if data.len() != count * 4 {
                 return Err(DiffusionError::Model(format!("{name}: invalid F32 byte length")));
@@ -171,12 +182,12 @@ pub fn load_f32_weight(path: &Path, name: &str) -> Result<F32Weight> {
         }
         dtype => return Err(DiffusionError::Model(format!("{name}: unsupported tensor dtype {dtype:?}"))),
     };
-    Ok(F32Weight { name: name.into(), shape: tensor.shape().to_vec(), values })
+    Ok(F32Weight { name: name.into(), shape: tensor.shape().to_vec(), source_dtype, values })
 }
 
 /// Loads a complete SD 1.5 CLIP token embedding table for Titan upload.
 pub fn load_sd15_token_embedding(model_dir: &Path) -> Result<F32Weight> {
-    load_f32_weight(&model_dir.join("text_encoder/model.safetensors"), "text_model.embeddings.token_embedding.weight")
+    load_diffusers_weight(model_dir, "text_encoder", "text_model.embeddings.token_embedding.weight")
 }
 
 
@@ -206,16 +217,21 @@ mod weight_tests {
         fs::write(&path, serialize([("weight", view)].into_iter(), None).expect("serialize")).expect("write");
         let weight = load_f32_weight(&path, "weight").expect("load");
         assert_eq!(weight.shape, vec![2]);
+        assert_eq!(weight.source_dtype, Dtype::F32);
         assert_eq!(weight.values, values);
         let _ = fs::remove_file(path);
     }
 
     #[test]
     fn loads_the_real_sd15_clip_embedding_table() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/sd15");
+        let path = std::env::var_os("SD15_MODEL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"D:\AI 生图\stable-diffusion.rs\models\sd15"));
         let weight = load_sd15_token_embedding(&path).expect("real SD15 CLIP embedding");
         assert_eq!(weight.shape, vec![49_408, 768]);
+        assert_eq!(weight.source_dtype, Dtype::F32);
         assert_eq!(weight.values.len(), 49_408 * 768);
+        assert_eq!(weight.values[0].to_bits(), 0xba9d_ebb0);
     }
 
 }
