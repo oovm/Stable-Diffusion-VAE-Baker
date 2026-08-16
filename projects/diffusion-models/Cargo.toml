@@ -8,4 +8,5 @@ titan-hal = { git = "https://github.com/game-gpt/titan.rs.git", rev = "8009af4",
 titan-tensor = { git = "https://github.com/game-gpt/titan.rs.git", rev = "8009af4", package = "titan-tensor" }
 safetensors = "0.8.0"
 half = "2.7"
+tokenizers = "0.22"
 serde_json.workspace = true

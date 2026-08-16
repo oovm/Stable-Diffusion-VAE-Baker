@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, OnceLock, RwLock},
 };
+use tokenizers::Tokenizer;
 
 
 /// Minimal DDIM scheduler state for an SD 1.5 denoising run.
@@ -118,6 +119,33 @@ pub struct F32Weight {
     pub source_dtype: Dtype,
     /// Converted f32 values.
     pub values: Vec<f32>,
+}
+
+/// Fixed-length SD 1.5 CLIP token IDs ready for a backend upload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sd15PromptTokens {
+    /// Exactly 77 IDs, including tokenizer-owned special tokens and EOT padding.
+    pub ids: Vec<usize>,
+}
+
+/// Encodes one prompt with the repository's SD 1.5 CLIP tokenizer.
+pub fn tokenize_sd15_prompt(tokenizer: &Tokenizer, prompt: &str) -> Result<Sd15PromptTokens> {
+    const CONTEXT: usize = 77;
+    let mut ids = tokenizer
+        .encode(prompt, true)
+        .map_err(|error| DiffusionError::Model(format!("tokenizer encode failed: {error}")))?
+        .get_ids()
+        .to_vec();
+    if ids.len() > CONTEXT {
+        return Err(DiffusionError::InvalidRequest(format!("prompt exceeds {CONTEXT} CLIP tokens")));
+    }
+    let pad = tokenizer
+        .get_vocab(true)
+        .get("<|endoftext|>")
+        .copied()
+        .ok_or_else(|| DiffusionError::Model("SD 1.5 tokenizer has no <|endoftext|> token".into()))?;
+    ids.resize(CONTEXT, pad);
+    Ok(Sd15PromptTokens { ids: ids.into_iter().map(|id| id as usize).collect() })
 }
 
 /// Loads one tensor from a Diffusers component directory.
@@ -234,4 +262,21 @@ mod weight_tests {
         assert_eq!(weight.values[0].to_bits(), 0xba9d_ebb0);
     }
 
+}
+
+#[cfg(test)]
+mod tokenizer_tests {
+    use super::*;
+
+    #[test]
+    fn encodes_real_sd15_prompt_to_fixed_token_ids() {
+        let path = std::env::var_os("SD15_TOKENIZER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"D:\AI 生图\stable-diffusion.rs\models\sd15\tokenizer\tokenizer.json"));
+        let tokenizer = Tokenizer::from_file(&path).expect("real SD15 tokenizer");
+        let tokens = tokenize_sd15_prompt(&tokenizer, "a photo of a cat").expect("prompt tokens");
+        assert_eq!(tokens.ids.len(), 77);
+        assert_eq!(&tokens.ids[..8], &[49406, 320, 1125, 539, 320, 2368, 49407, 49407]);
+        assert!(tokens.ids[7..].iter().all(|id| *id == 49407));
+    }
 }
