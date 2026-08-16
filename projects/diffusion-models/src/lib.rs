@@ -11,7 +11,7 @@ use titan_backend_cpu::CpuDriver;
 use titan_graph::{EffectContract, OpRequest, TensorSpec};
 use titan_hal::BackendDriver;
 use titan_runtime::Runtime;
-use titan_tensor::{Device as TitanDevice, F32Tensor};
+use titan_tensor::{Device as TitanDevice, F32Tensor, TensorHandle};
 use titan_types::{AliasContract, AttrMap, AttrValue, DType, Layout, MemoryEffect, OperatorId, Shape, SourceSpan, Strides};
 use tokenizers::Tokenizer;
 
@@ -144,6 +144,11 @@ pub struct TitanCpuTensor1 {
     tensor: F32Tensor<1>,
 }
 
+/// A dynamic `[77, 768]` tensor retained through Titan's opaque handle contract.
+pub struct TitanCpuTensor2 {
+    handle: TensorHandle,
+}
+
 impl TitanCpuBridge {
     /// Opens Titan's portable CPU device (ordinal zero).
     pub fn open() -> Result<Self> {
@@ -178,6 +183,54 @@ impl TitanCpuBridge {
     /// Uploads a host vector for a backend-neutral Titan operation.
     pub fn upload_values(&self, values: &[f32]) -> Result<TitanCpuTensor1> {
         self.upload_f32(values)
+    }
+
+    /// Uploads the SD1.5 CLIP sequence embedding with its semantic rank preserved.
+    pub fn upload_clip_sequence(&self, values: &[f32]) -> Result<TitanCpuTensor2> {
+        if values.len() != 77 * 768 {
+            return Err(DiffusionError::InvalidRequest("SD15 CLIP sequence must contain [77, 768] values".into()));
+        }
+        let handle = TensorHandle::from_f32_vec(self.device.session().clone(), vec![77, 768], values)
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU sequence upload failed: {error}")))?;
+        Ok(TitanCpuTensor2 { handle })
+    }
+
+    /// Executes Titan Runtime's CPU LayerNorm contract with learned gamma/beta.
+    pub fn layer_norm_readback(
+        &self,
+        input: &TitanCpuTensor2,
+        gamma: &TitanCpuTensor1,
+        beta: &TitanCpuTensor1,
+    ) -> Result<Vec<f32>> {
+        let mut attrs = AttrMap::new();
+        attrs.insert("epsilon".into(), AttrValue::Float((1e-5_f64).to_bits()));
+        let request = OpRequest {
+            operator: OperatorId("layer_norm".into()),
+            inputs: vec![input.handle.clone(), gamma.tensor.handle(), beta.tensor.handle()],
+            outputs: vec![TensorSpec {
+                dtype: DType::F32,
+                shape: Shape(vec![77, 768]),
+                strides: Strides(vec![768, 1]),
+                layout: Layout::Contiguous,
+                alias: AliasContract::NoAlias,
+            }],
+            attrs,
+            effects: EffectContract { memory: MemoryEffect::Writes, deterministic: true },
+            source: SourceSpan { file: "diffusion-models::TitanCpuBridge::layer_norm_readback".into(), line: 1, column: 1 },
+        };
+        let mut runtime = Runtime::open(std::env::temp_dir().join("stable-native-sd15-titan-cpu"));
+        let output = runtime
+            .execute(request)
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU LayerNorm dispatch failed: {error}")))?
+            .wait()
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU LayerNorm wait failed: {error}")))?
+            .outputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| DiffusionError::Model("Titan CPU LayerNorm returned no output".into()))?;
+        output
+            .to_vec_f32()
+            .map_err(|error| DiffusionError::Model(format!("Titan CPU LayerNorm output read failed: {error}")))
     }
 
     /// Adds two same-shaped tensors through Titan Runtime's generated CPU contract.
@@ -468,5 +521,69 @@ mod tokenizer_tests {
         for (actual, expected) in actual.iter().zip(expected) {
             assert!((actual - expected).abs() <= 1e-7, "Titan add mismatch: {actual} vs {expected}");
         }
+    }
+
+    #[test]
+    fn executes_sd15_first_layer_norm_on_titan_cpu() {
+        let model_dir = std::env::var_os("SD15_MODEL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"D:\AI 生图\stable-diffusion.rs\models\sd15"));
+        let tokenizer_path = std::env::var_os("SD15_TOKENIZER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| model_dir.join("tokenizer/tokenizer.json"));
+        let tokenizer = Tokenizer::from_file(&tokenizer_path).expect("real SD15 tokenizer");
+        let tokens = tokenize_sd15_prompt(&tokenizer, "a photo of a cat").expect("prompt tokens");
+        let token_table = load_sd15_token_embedding(&model_dir).expect("real token embedding");
+        let position_table = load_sd15_position_embedding(&model_dir).expect("real position embedding");
+        let token_rows = lookup_sd15_token_embeddings(&tokens, &token_table).expect("embedding lookup");
+        let position_rows = sd15_position_values(&tokens, &position_table).expect("position rows");
+        let gamma = load_f32_weight(
+            &model_dir.join("text_encoder/model.safetensors"),
+            "text_model.encoder.layers.0.layer_norm1.weight",
+        )
+        .expect("real first LayerNorm gamma");
+        let beta = load_f32_weight(
+            &model_dir.join("text_encoder/model.safetensors"),
+            "text_model.encoder.layers.0.layer_norm1.bias",
+        )
+        .expect("real first LayerNorm beta");
+        assert_eq!(gamma.shape, vec![768]);
+        assert_eq!(beta.shape, vec![768]);
+
+        let bridge = TitanCpuBridge::open().expect("Titan CPU");
+        let input = bridge
+            .add_readback(
+                &bridge.upload_values(&token_rows).expect("upload token rows"),
+                &bridge.upload_values(&position_rows).expect("upload position rows"),
+            )
+            .expect("Titan CPU embedding add");
+        let actual = bridge
+            .layer_norm_readback(
+                &bridge.upload_clip_sequence(&input).expect("upload CLIP sequence"),
+                &bridge.upload_values(&gamma.values).expect("upload gamma"),
+                &bridge.upload_values(&beta.values).expect("upload beta"),
+            )
+            .expect("Titan CPU first LayerNorm");
+        let expected = cpu_layer_norm_reference(&input, &gamma.values, &beta.values, 1e-5);
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() <= 1e-6, "Titan LayerNorm mismatch: {actual} vs {expected}");
+        }
+    }
+
+    fn cpu_layer_norm_reference(input: &[f32], gamma: &[f32], beta: &[f32], epsilon: f64) -> Vec<f32> {
+        input
+            .chunks_exact(768)
+            .flat_map(|row| {
+                let mean = row.iter().map(|value| *value as f64).sum::<f64>() / 768.0;
+                let variance = row.iter().map(|value| (*value as f64 - mean).powi(2)).sum::<f64>() / 768.0;
+                let inverse_stddev = 1.0 / (variance + epsilon).sqrt();
+                row.iter()
+                    .zip(gamma)
+                    .zip(beta)
+                    .map(|((value, gamma), beta)| (((*value as f64 - mean) * inverse_stddev) as f32 * *gamma) + *beta)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 }
